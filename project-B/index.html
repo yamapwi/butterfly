@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>snow White</title>
+  <style>
+    :root{
+      --bg:#000;
+      --fg:#eaf2ff;
+      --muted:#9bb3d4;
+      --border:#1a2230;
+      --btn:rgba(19,26,36,.75);
+      --btn2:rgba(24,34,53,.85);
+    }
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+    header{
+      position:fixed;left:0;right:0;top:0;z-index:10;
+      padding:10px 12px;border-bottom:1px solid var(--border);
+      display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+      background:linear-gradient(180deg, rgba(10,10,12,.92), rgba(0,0,0,.35));
+      backdrop-filter: blur(10px);
+    }
+    .group{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .label{font-size:12px;color:var(--muted)}
+    input[type="text"]{
+      background:rgba(10,14,20,.75);color:var(--fg);
+      border:1px solid #243042;border-radius:10px;
+      padding:8px 10px; width:min(520px, 72vw);
+      outline:none;
+    }
+    input::placeholder{color:rgba(155,179,212,.65)}
+    button{
+      background:var(--btn);color:var(--fg);
+      border:1px solid #243042;border-radius:10px;
+      padding:8px 10px; cursor:pointer;
+    }
+    button:hover{background:var(--btn2)}
+    input[type="range"]{accent-color:#ffd34a}
+    .pill{
+      display:inline-block;padding:2px 8px;border-radius:999px;
+      border:1px solid #243042;background:rgba(19,26,36,.55);
+      color:var(--fg);font-size:12px;
+    }
+    #wrap{position:relative;height:100vh;overflow:hidden}
+    canvas{position:absolute;inset:0;z-index:2}
+    video{position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0}
+    #ytplayer{
+      width:1px;height:1px;opacity:0.01;pointer-events:none;
+      position:absolute;left:-9999px;top:-9999px;
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <div class="group" style="flex:1 1 420px">
+    <span class="label">YouTube URL </span>
+    <input id="ytInput" type="text" value="" placeholder="貼上 https://youtu.be/... " />
+    <button id="ytLoad">載入</button>
+  </div>
+
+  <div class="group">
+    <button id="ytPlay">▶️</button>
+    <button id="ytPause">⏸</button>
+    <button id="ytStop">⏹</button>
+  </div>
+
+  <div class="group">
+    <span class="label">音量</span>
+    <input id="ytVol" type="range" min="0" max="100" value="30" />
+    <span id="ytVolText" class="pill">30</span>
+  </div>
+</header>
+
+<div id="wrap">
+  <video id="video" playsinline></video>
+  <canvas id="c"></canvas>
+  <div id="ytplayer"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+
+<script>
+  const st = document.getElementById('st');
+  const posePill = document.getElementById('pose');
+  const swingPill = document.getElementById('swing');
+  const bfPill = document.getElementById('bf');
+  const errPill = document.getElementById('err');
+  const ytStatePill = document.getElementById('ytState');
+
+  function setErr(e){
+    if(!e){ if(errPill) errPill.textContent = '—'; return; }
+    if(errPill) errPill.textContent = (e.name ? (e.name + ': ') : '') + (e.message || String(e));
+  }
+  function setYTState(t){ if(ytStatePill) ytStatePill.textContent = t; }
+
+  function parseYouTubeVideoId(input) {
+    const s = (input || "").trim();
+    if (!s) return null;
+    if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
+    try {
+      const url = new URL(s);
+      if (url.hostname.includes("youtu.be")) {
+        const id = url.pathname.split("/").filter(Boolean)[0];
+        if (id && /^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
+      }
+      const v = url.searchParams.get("v");
+      if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
+      const parts = url.pathname.split("/").filter(Boolean);
+      const shortsIndex = parts.indexOf("shorts");
+      if (shortsIndex >= 0 && parts[shortsIndex + 1]) {
+        const id = parts[shortsIndex + 1];
+        if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
+      }
+      const embedIndex = parts.indexOf("embed");
+      if (embedIndex >= 0 && parts[embedIndex + 1]) {
+        const id = parts[embedIndex + 1];
+        if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
+      }
+    } catch {}
+    return null;
+  }
+
+  let ytPlayer = null;
+  let pendingVideoId = null;
+  let ytLoadPromise = null;
+
+  function loadYouTubeIframeApiOnce(){
+    if (ytLoadPromise) return ytLoadPromise;
+
+    ytLoadPromise = new Promise((resolve, reject) => {
+      if (window.YT && window.YT.Player) {
+        setYTState("api-ready");
+        return resolve();
+      }
+
+      setYTState("loading-api");
+
+      const s = document.createElement("script");
+      s.src = "https://www.youtube.com/iframe_api";
+      s.async = true;
+
+      s.onerror = () => {
+        setYTState("api-blocked");
+        reject(new Error("YT iframe_api 載入失敗（可能被 AdBlock/防追蹤擋）"));
+      };
+
+      document.head.appendChild(s);
+
+      const start = performance.now();
+      const timer = setInterval(() => {
+        if (window.YT && window.YT.Player) {
+          clearInterval(timer);
+          setYTState("api-ready");
+          resolve();
+        } else if (performance.now() - start > 8000) {
+          clearInterval(timer);
+          setYTState("api-timeout");
+          reject(new Error("YT API 逾時（可能網路慢或被擋）"));
+        }
+      }, 100);
+    });
+
+    return ytLoadPromise;
+  }
+
+  async function ensureYTPlayer(){
+    await loadYouTubeIframeApiOnce();
+
+    if (ytPlayer) return ytPlayer;
+
+    setYTState("creating-player");
+    ytPlayer = new YT.Player("ytplayer", {
+      height: "1",
+      width: "1",
+      videoId: "dQw4w9WgXcQ",
+      playerVars: { autoplay: 0, controls: 0, rel: 0, playsinline: 1 },
+      events: {
+        onReady: () => {
+          setYTState("ready");
+          try{
+            const v = Number(document.getElementById("ytVol").value);
+            ytPlayer.setVolume(v);
+          }catch{}
+          if (pendingVideoId) {
+            ytPlayer.cueVideoById(pendingVideoId);
+            setYTState("cued");
+          }
+        },
+        onStateChange: (e) => {
+          const map = {"-1":"unstarted","0":"ended","1":"playing","2":"paused","3":"buffering","5":"cued"};
+          setYTState(map[String(e.data)] || ("state-"+e.data));
+        },
+        onError: (e) => {
+          setYTState("error-"+(e?.data ?? "unknown"));
+          setErr(new Error("YT Error code: " + (e?.data ?? e)));
+        }
+      }
+    });
+
+    return ytPlayer;
+  }
+
+  function getInputVideoIdOrThrow(){
+    const raw = document.getElementById("ytInput").value.trim();
+    const id = parseYouTubeVideoId(raw);
+    if(!id) throw new Error("請先貼上 YouTube URL 或輸入 11 碼 Video ID");
+    return id;
+  }
+
+  document.getElementById("ytVol").oninput = (e) => {
+    const v = Number(e.target.value);
+    document.getElementById("ytVolText").textContent = String(v);
+    try{ ytPlayer?.setVolume?.(v); }catch{}
+  };
+
+  document.getElementById("ytLoad").onclick = async () => {
+    try{
+      setErr(null);
+      const id = getInputVideoIdOrThrow();
+      pendingVideoId = id;
+      const p = await ensureYTPlayer();
+      p.cueVideoById(id);
+      setYTState("cued");
+    }catch(e){ setErr(e); }
+  };
+
+  document.getElementById("ytPlay").onclick = async () => {
+    try{
+      setErr(null);
+      const id = getInputVideoIdOrThrow();
+      pendingVideoId = id;
+
+      const p = await ensureYTPlayer();
+
+      p.loadVideoById(id);
+
+      p.mute();
+      p.playVideo();
+
+      setTimeout(() => {
+        try{
+          const v = Number(document.getElementById("ytVol").value);
+          p.setVolume(v);
+          p.unMute();
+          p.playVideo();
+        }catch{}
+      }, 250);
+    }catch(e){ setErr(e); }
+  };
+
+  document.getElementById("ytPause").onclick = () => {
+    try{ setErr(null); ytPlayer?.pauseVideo(); }catch(e){ setErr(e); }
+  };
+
+  document.getElementById("ytStop").onclick = () => {
+    try{ setErr(null); ytPlayer?.stopVideo(); setYTState("stopped"); }catch(e){ setErr(e); }
+  };
+
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  function resize(){
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  let latestLandmarks = null;
+  let lastPoseMs = 0;
+
+  const EDGES = [
+    [11,12],
+    [11,13],[13,15],
+    [12,14],[14,16],
+    [11,23],[12,24],
+    [23,24],
+  ];
+
+  let showSkeleton = true;
+  let showButterfly = true;
+
+  const BUTTER_RGB = [255, 211, 74];
+  const BUTTER_WHITE = [255, 246, 210];
+
+  class Particle {
+    constructor(x,y,vx,vy,life,rad,mode){
+      this.x=x; this.y=y; this.vx=vx; this.vy=vy;
+      this.life=life; this.maxLife=life;
+      this.rad=rad; this.mode=mode;
+    }
+    step(){
+      this.x += this.vx; this.y += this.vy;
+      if(this.mode === "dust"){
+        this.vx *= 0.98; this.vy *= 0.99; this.vy -= 0.002;
+      } else {
+        this.vx *= 0.96; this.vy *= 0.96;
+      }
+      this.life -= 1;
+    }
+    draw(){
+      const t = this.life / this.maxLife;
+      const a = 255 * t;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = `rgba(${BUTTER_RGB[0]},${BUTTER_RGB[1]},${BUTTER_RGB[2]},${(a*0.18)/255})`;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.rad*1.6, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = `rgba(${BUTTER_RGB[0]},${BUTTER_RGB[1]},${BUTTER_RGB[2]},${(a*0.55)/255})`;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.rad*0.8, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${(a*0.28)/255})`;
+      ctx.beginPath(); ctx.arc(this.x+0.6, this.y-0.6, this.rad*0.45, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+  const particles = [];
+
+  function spawnTrail(x,y,vx,vy,rate){
+    if(Math.random() < rate){
+      particles.push(new Particle(
+        x+(Math.random()-0.5)*3,
+        y+(Math.random()-0.5)*3,
+        -vx*0.15+(Math.random()-0.5)*0.8,
+        -vy*0.15+(Math.random()-0.5)*0.8,
+        28+Math.floor(Math.random()*22),
+        1.2+Math.random()*1.6,
+        "trail"
+      ));
+    }
+  }
+  function spawnDust(x,y){
+    if(Math.random() < 0.10){
+      particles.push(new Particle(
+        x+(Math.random()-0.5)*14,
+        y+(Math.random()-0.5)*10,
+        (Math.random()-0.5)*0.25,
+        -0.10-Math.random()*0.20,
+        120+Math.floor(Math.random()*120),
+        1.2+Math.random()*1.8,
+        "dust"
+      ));
+    }
+  }
+
+  const BF = { state:"IDLE", x:0,y:0,vx:0,vy:0,theta:0,wingPhase:0,lastLowMs:0 };
+
+  function randomSpawnOutside(w,h,margin=80){
+    const r = Math.random();
+    if (r < 0.25) return { x:-margin, y:Math.random()*h };
+    if (r < 0.50) return { x:w+margin, y:Math.random()*h };
+    if (r < 0.75) return { x:Math.random()*w, y:-margin };
+    return { x:Math.random()*w, y:h+margin };
+  }
+  function steerSeek(tx, ty, strength=0.06, damping=0.92, maxSpeed=6){
+    const dx = tx - BF.x, dy = ty - BF.y;
+    BF.vx += dx * strength;
+    BF.vy += dy * strength;
+    const sp = Math.hypot(BF.vx, BF.vy);
+    if(sp > maxSpeed){ BF.vx=(BF.vx/sp)*maxSpeed; BF.vy=(BF.vy/sp)*maxSpeed; }
+    BF.vx *= damping; BF.vy *= damping;
+    const jitter = 0.10;
+    BF.vx += (Math.random()-0.5)*jitter;
+    BF.vy += (Math.random()-0.5)*jitter;
+    BF.x += BF.vx; BF.y += BF.vy;
+  }
+  function roundRect(x,y,w,h,r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr, y);
+    ctx.arcTo(x+w, y, x+w, y+h, rr);
+    ctx.arcTo(x+w, y+h, x, y+h, rr);
+    ctx.arcTo(x, y+h, x, y, rr);
+    ctx.arcTo(x, y, x+w, y, rr);
+    ctx.closePath();
+  }
+  function drawButterfly(x,y,size,wingPhase){
+    const flutter = Math.sin(wingPhase) * (size * 0.45);
+    const wingSpan = size;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    for(let k=3;k>=1;k--){
+      const a2 = 220 * (0.12*k);
+      ctx.fillStyle = `rgba(${BUTTER_RGB[0]},${BUTTER_RGB[1]},${BUTTER_RGB[2]},${a2/255})`;
+      const rad = wingSpan * (1.1 + k*0.25);
+      ctx.beginPath(); ctx.ellipse(x-wingSpan/2, y-4, rad/2, (rad+flutter)/2, 0, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x+wingSpan/2, y-4, rad/2, (rad-flutter)/2, 0, 0, Math.PI*2); ctx.fill();
+    }
+
+    ctx.fillStyle = `rgba(${BUTTER_WHITE[0]},${BUTTER_WHITE[1]},${BUTTER_WHITE[2]},${140/255})`;
+    ctx.beginPath(); ctx.ellipse(x-wingSpan/2, y-5, (wingSpan*0.85)/2, (wingSpan*0.75 + flutter*0.35)/2, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+wingSpan/2, y-5, (wingSpan*0.85)/2, (wingSpan*0.75 - flutter*0.35)/2, 0, 0, Math.PI*2); ctx.fill();
+
+    ctx.restore();
+
+    ctx.fillStyle = "rgba(245,245,255,0.86)";
+    roundRect(x-2, y-size*0.9, 4, size*1.6, 3);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.86)";
+    ctx.beginPath(); ctx.arc(x, y-size*0.9, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  let prevWrist = null;
+  let swing = 0;
+  const SWING_DECAY = 0.90;
+  const ENTER_ORBIT = 0.35;
+  const EXIT_ORBIT  = 0.18;
+  const EXIT_HOLD_MS = 1000;
+  const SPEED_NORM = 35;
+  const clamp01 = x => Math.max(0, Math.min(1, x));
+
+  function renderLoop(){
+    const W = canvas.width, H = canvas.height;
+    const now = performance.now();
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,W,H);
+
+    const poseFresh = latestLandmarks && (now - lastPoseMs < 450);
+    if(posePill) posePill.textContent = poseFresh ? "yes" : "no";
+
+    if(poseFresh){
+      const lw = latestLandmarks[15];
+      const rw = latestLandmarks[16];
+      const wx = ((lw.x + rw.x)*0.5)*W;
+      const wy = ((lw.y + rw.y)*0.5)*H;
+      if(prevWrist){
+        const dx = wx - prevWrist.x, dy = wy - prevWrist.y;
+        const speed = Math.sqrt(dx*dx + dy*dy);
+        const e = clamp01(speed / SPEED_NORM);
+        swing = Math.max(e, swing * SWING_DECAY);
+      }
+      prevWrist = {x:wx, y:wy};
+    } else {
+      swing *= 0.92;
+      prevWrist = null;
+    }
+    if(swingPill) swingPill.textContent = swing.toFixed(2);
+
+    if(showSkeleton && poseFresh){
+      ctx.lineWidth=3;
+      ctx.strokeStyle="rgba(180,210,255,0.50)";
+      for(const [a,b] of EDGES){
+        const A=latestLandmarks[a], B=latestLandmarks[b];
+        if(!A||!B) continue;
+        ctx.beginPath();
+        ctx.moveTo(A.x*W, A.y*H);
+        ctx.lineTo(B.x*W, B.y*H);
+        ctx.stroke();
+      }
+      ctx.fillStyle="rgba(255,255,255,0.45)";
+      for(const lm of latestLandmarks){
+        ctx.beginPath(); ctx.arc(lm.x*W, lm.y*H, 2.8, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    for(let i=particles.length-1;i>=0;i--){
+      const pt=particles[i]; pt.step(); pt.draw();
+      if(pt.life<=0) particles.splice(i,1);
+    }
+
+    if(!showButterfly){
+      BF.state="IDLE"; if(bfPill) bfPill.textContent = BF.state;
+      requestAnimationFrame(renderLoop); return;
+    }
+
+    if(poseFresh){
+      const rs=latestLandmarks[12], ls=latestLandmarks[11];
+      const center={ x:((ls.x+rs.x)*0.5)*W, y:((ls.y+rs.y)*0.5)*H };
+      const breatheX=Math.sin(now*0.0010)*2.0;
+      const breatheY=Math.cos(now*0.0008)*3.0;
+      const anchor={ x:(rs.x*W)+38+breatheX, y:(rs.y*H)-10+breatheY };
+
+      if(BF.state==="IDLE"){
+        const s=randomSpawnOutside(W,H,80);
+        BF.x=s.x; BF.y=s.y; BF.vx=0; BF.vy=0;
+        BF.theta=Math.random()*Math.PI*2;
+        BF.wingPhase=0; BF.lastLowMs=0;
+        BF.state="APPROACH";
+      }
+
+      if(BF.state==="PERCH" && swing>ENTER_ORBIT){
+        BF.state="ORBIT"; BF.lastLowMs=0;
+      } else if(BF.state==="ORBIT"){
+        if(swing<EXIT_ORBIT){
+          if(!BF.lastLowMs) BF.lastLowMs=now;
+          if(now-BF.lastLowMs>EXIT_HOLD_MS){ BF.state="PERCH"; BF.lastLowMs=0; }
+        } else BF.lastLowMs=0;
+      }
+
+      if(BF.state==="APPROACH"){
+        steerSeek(anchor.x, anchor.y, 0.05, 0.90, 7);
+        if(Math.hypot(anchor.x-BF.x, anchor.y-BF.y)<18) BF.state="PERCH";
+      } else if(BF.state==="PERCH"){
+        steerSeek(anchor.x, anchor.y, 0.04, 0.86, 5.2);
+      } else if(BF.state==="ORBIT"){
+        const baseSpeed=0.030, boost=0.070*swing;
+        BF.theta += (baseSpeed+boost);
+        const rx=95+55*swing, ry=65+40*swing;
+        const tx=center.x+Math.cos(BF.theta)*rx;
+        const ty=center.y+Math.sin(BF.theta)*ry;
+        steerSeek(tx, ty, 0.035, 0.90, 8);
+      }
+
+      let wingFreq=1.4;
+      if(BF.state==="APPROACH") wingFreq=1.8;
+      if(BF.state==="ORBIT") wingFreq=2.2;
+      BF.wingPhase += (Math.PI*2)*(wingFreq/60);
+
+      const trailRate=(BF.state==="ORBIT")?0.65:(BF.state==="APPROACH"?0.45:0.18);
+      spawnTrail(BF.x,BF.y,BF.vx,BF.vy,trailRate);
+      if(BF.state==="PERCH") spawnDust(BF.x,BF.y);
+
+      const size=(BF.state==="PERCH")?20:(BF.state==="APPROACH"?22:24);
+      drawButterfly(BF.x,BF.y,size,BF.wingPhase);
+      if(bfPill) bfPill.textContent = BF.state;
+    } else {
+      BF.state="IDLE"; if(bfPill) bfPill.textContent = BF.state;
+      ctx.fillStyle="rgba(255,255,255,0.45)";
+      ctx.font="14px system-ui, sans-serif";
+      ctx.textAlign="center";
+      ctx.fillText("等待偵測到人體姿態…", W/2, H/2);
+    }
+
+    requestAnimationFrame(renderLoop);
+  }
+
+  async function startPose(){
+    try{
+      if(st) st.textContent="請求 webcam 權限…";
+      setErr(null);
+      const stream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+      video.srcObject = stream;
+      await video.play();
+
+      if(st) st.textContent="webcam OK，載入 Pose…";
+      const pose = new Pose({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/${file}`
+      });
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        selfieMode: true
+      });
+
+      pose.onResults((results) => {
+        latestLandmarks = results.poseLandmarks || null;
+        if(latestLandmarks) lastPoseMs = performance.now();
+      });
+
+      if(st) st.textContent="Pose running ✅";
+      const camera = new Camera(video, {
+        onFrame: async () => { await pose.send({image: video}); },
+        width: 1280,
+        height: 720
+      });
+      camera.start();
+
+      renderLoop();
+    } catch(e){
+      console.error(e);
+      setErr(e);
+      if(st) st.textContent="❌ 啟動失敗（看錯誤）";
+    }
+  }
+
+  window.addEventListener('load', startPose);
+</script>
+</body>
+</html>

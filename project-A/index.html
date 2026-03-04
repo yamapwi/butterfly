@@ -1,0 +1,1459 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>為什麼半夜不睡覺</title>
+<style>
+:root{--bg:#0b0f14;--fg:#eaf2ff;--border:#1a2230}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+body{display:flex;flex-direction:column;height:100vh}
+header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button,select,input[type=file],input[type=range],input[type=checkbox]{background:#131a24;color:var(--fg);border:1px solid #243042;border-radius:8px;padding:6px 10px}
+button:disabled{opacity:.5}
+.sep{width:1px;height:24px;background:#223046}
+.pill{padding:2px 8px;border:1px solid #2a3a52;border-radius:999px;font-size:12px;color:#a9c8ff;margin-left:6px}
+
+#stage{display:flex;flex-direction:column;flex:1;min-height:0}
+#canvas-wrap{position:relative;flex:1;min-height:0}
+#log{position:absolute;bottom:10px;right:10px;font-size:12px;color:#9bb3d4;pointer-events:none;max-width:60vw;text-align:right}
+footer{height:40px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12px;color:#9bb3d4}
+
+
+#vkbBottom{
+  display:block;
+  border-top:1px solid #1b2740;
+  background:rgba(8,12,18,.95);
+}
+
+
+#vkbBar{display:none;}
+
+.vkbd-wrap{
+  position:relative;
+  height:100%;
+  background:#0f1622;
+}
+#vkbd{
+  position:relative;
+  user-select:none;
+  touch-action:none;
+  width:100%;
+  height:220px;
+  border-top:1px solid #1b2740;
+}
+
+
+.white-keys{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:stretch;
+}
+.black-keys{
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+}
+.key{
+  position:relative;
+  box-sizing:border-box;
+  cursor:pointer;
+  transition:background-color .05s ease, transform .04s ease;
+}
+
+
+.key.white{
+  flex:1 0 auto;
+  height:100%;
+  background:#e7eefc;
+  border-right:1px solid #223046;
+}
+.key.white:last-child{border-right:none;}
+.key.white.on{background:#cfe0ff;}
+.key.white.playing{
+  background:#bcd1fb;
+  transform:translateY(1px);
+}
+
+
+.key.black{
+  position:absolute;
+  width:calc(100%/21*0.6);
+  height:62%;
+  top:0;
+  background:#1c2331;
+  border:1px solid #2a3a52;
+  border-radius:0 0 6px 6px;
+  z-index:5;
+  pointer-events:auto;
+}
+.key.black.on{background:#2b3954;}
+.key.black.playing{
+  background:#3b4f78;
+  transform:translateY(1px);
+}
+
+
+#scrubWrap{display:flex;align-items:center;gap:10px;min-width:260px;flex:1}
+#scrub{
+  width:100%;
+  height:6px;
+  border-radius:999px;
+  background:#1a2435;
+  outline:none;
+  border:1px solid #243042;
+  -webkit-appearance:none;
+  appearance:none;
+}
+#scrub:disabled{opacity:.5}
+#scrub::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  width:14px;
+  height:14px;
+  border-radius:50%;
+  background:#f6c177;
+  border:1px solid #774;
+  cursor:pointer;
+  margin-top:-4px;
+}
+#scrub::-moz-range-thumb{
+  width:14px;
+  height:14px;
+  border-radius:50%;
+  background:#f6c177;
+  border:1px solid #774;
+  cursor:pointer;
+}
+</style>
+</head>
+<body>
+<header>
+  <input id="file" type="file" accept=".mid,.midi"/>
+  <button id="play" disabled>▶️ 播放</button>
+  <button id="stop" disabled>⏹ 停止</button>
+  <button id="unlock">🔓 啟用音訊</button>
+
+  <span class="sep"></span>
+  <label>模式：
+    <select id="mode">
+      <option value="pulse" selected>圈圈</option>
+      <option value="piano">Piano Roll</option>
+      <option value="stars">星塵</option>
+      <option value="field">粒子</option>
+      <option value="snow">下雪</option>
+      <option value="snowCity">雪：城市夜景</option>
+      <option value="butterflyCute">蝴蝶：可愛</option>
+      <option value="butterflyGlow">蝴蝶：光粒</option>
+      <option value="butterflyPattern">蜻蜓</option>
+      <option value="rain">雨：落下</option>
+      <option value="rainRipple">雨：漣漪</option>
+    </select>
+  </label>
+  <span id="pianoControls" style="display:none">
+    <label>px/s
+      <input id="pxPerSec" type="range" min="80" max="360" value="180"/>
+      <span id="pxPerSecVal" class="pill">180</span>
+    </label>
+  </span>
+
+  <span class="sep"></span>
+
+  <div id="scrubWrap" title="拖曳或點擊以跳到指定時間">
+    <input id="scrub" type="range" min="0" value="0" step="0.001" disabled />
+    <span id="scrubVal" class="pill">0:00</span>
+  </div>
+
+  <span class="sep"></span>
+  <label style="display:flex;align-items:center;gap:8px">
+    <input id="toggleVKB" type="checkbox" checked />
+    顯示下方虛擬鋼琴
+  </label>
+</header>
+
+<div id="stage">
+  <div id="canvas-wrap"></div>
+
+  <div id="vkbBottom" aria-hidden="false">
+    <div id="vkbBar">
+      🎹 虛擬鋼琴 <span id="vkbRange" class="pill">C3–B6</span>
+      <label>高度
+        <input id="vkbHeight" type="range" min="120" max="260" value="180"/>
+        <span id="vkbHeightVal" class="pill">180</span>
+      </label>
+      <label>起始八度
+        <input id="octaveStart" type="range" min="2" max="6" value="3"/>
+        <span id="octaveStartVal" class="pill">3</span>
+      </label>
+      <label>八度數
+        <input id="octaveCount" type="range" min="1" max="4" value="4"/>
+        <span id="octaveCountVal" class="pill">4</span>
+      </label>
+    </div>
+    <div class="vkbd-wrap"><div id="vkbd"></div></div>
+  </div>
+
+  <div id="log">狀態：一不小心就會壞掉</div>
+</div>
+
+<footer>🎵 Tone.js · @tonejs/midi · p5.js</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+
+<script>
+
+window.addEventListener('error', e => {
+  document.querySelector('#log').textContent =
+    '⚠️ JS Error: ' + (e.message || e.error);
+});
+
+
+const $ = s => document.querySelector(s);
+const file=$('#file'), play=$('#play'), stopBtn=$('#stop'), unlockBtn=$('#unlock'), log=$('#log');
+const modeSel=$('#mode'), pxPerSecEl=$('#pxPerSec'), pxPerSecVal=$('#pxPerSecVal'), pianoControls=$('#pianoControls');
+const toggleVKB=$('#toggleVKB'), vkbBottom=$('#vkbBottom'), vkbHeight=$('#vkbHeight'), vkbHeightVal=$('#vkbHeightVal');
+const vkbdEl=$('#vkbd'), vkbRange=$('#vkbRange'), octaveStart=$('#octaveStart'), octaveCount=$('#octaveCount');
+const octaveStartVal=$('#octaveStartVal'), octaveCountVal=$('#octaveCountVal');
+const scrub=$('#scrub'), scrubVal=$('#scrubVal');
+
+
+let midi=null, parts=[], synths=[], liveSynth=null;
+let started=false, liveClockStart=null, isScrubbing=false, usePreview=false, previewSec=0;
+
+
+const piano = new Tone.Sampler({
+  urls: {
+    A0:  "A0.mp3",
+    C1:  "C1.mp3",
+    "F#1": "Fs1.mp3",
+    C2:  "C2.mp3",
+    "F#2": "Fs2.mp3",
+    C3:  "C3.mp3",
+    "F#3": "Fs3.mp3",
+    C4:  "C4.mp3",
+    "F#4": "Fs4.mp3",
+    C5:  "C5.mp3",
+    "F#5": "Fs5.mp3",
+    C6:  "C6.mp3",
+    "F#6": "Fs6.mp3",
+    C7:  "C7.mp3"
+  },
+  release: 1.2,
+  baseUrl: "https://tonejs.github.io/audio/salamander/"
+}).toDestination();
+
+
+function timelineSeconds(){
+  if (Tone.Transport.state === 'started') {
+    if (liveClockStart === null) {
+      liveClockStart = Tone.now() - Tone.Transport.seconds;
+    }
+    return Tone.now() - liveClockStart;
+  }
+  if (usePreview) return previewSec;
+  if (liveClockStart === null) liveClockStart = Tone.now();
+  return Tone.now() - liveClockStart;
+}
+function resetLiveClock(){ liveClockStart = Tone.now(); }
+
+
+async function ensureAudio(){
+  if (started) return true;
+  try{
+    await Tone.start();
+    if (Tone.getContext().rawContext.state !== 'running'){
+      await Tone.getContext().rawContext.resume();
+    }
+    started = true;
+    if (!liveSynth) liveSynth = piano;
+    log.textContent = '✅ 音訊已啟用。';
+    return true;
+  }catch(err){
+    log.textContent = '❌ 無法啟用音訊：' + err;
+    return false;
+  }
+}
+unlockBtn.addEventListener('click', ensureAudio);
+document.addEventListener('pointerdown', ()=>{ if(!started) ensureAudio(); }, {once:false});
+
+
+modeSel.onchange=()=>{ 
+  V.mode=modeSel.value; 
+  pianoControls.style.display = (V.mode==='piano') ? 'inline-flex' : 'none'; 
+
+  if (V.mode.startsWith('butterfly')) {
+    V.cuteQueue.length    = 0; V.cuteButterflies.length    = 0;
+    V.glowQueue.length    = 0; V.glowButterflies.length    = 0;
+    V.patternQueue.length = 0; V.patternButterflies.length = 0;
+  }
+
+  if (V.mode === 'rain' || V.mode === 'rainRipple') {
+    V.rainQueue.length = 0;
+    V.rainDrops.length = 0;
+    V.rainRipples.length = 0;
+  }
+  if (V.mode === 'snow') {
+    V.snowQueue.length = 0;
+    V.snowHits.length = 0;
+  }
+  if (V.mode === 'snowCity') {
+    V.snowCityQueue.length = 0;
+    V.snowCityNoteSnow.length = 0;
+    V.snowCityWindowFlashes.length = 0;
+  }
+};
+pxPerSecEl.oninput=()=>{ pxPerSecVal.textContent = pxPerSecEl.value; };
+toggleVKB.onchange=()=>{ 
+  vkbBottom.style.display = toggleVKB.checked ? 'block' : 'none'; 
+  vkbBottom.setAttribute('aria-hidden', (!toggleVKB.checked).toString());
+};
+
+
+file.onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  log.textContent="讀取中...";
+
+  Tone.Transport.stop();
+  Tone.Transport.seconds = 0;
+  usePreview = true;
+  previewSec = 0;
+  liveClockStart = null;
+  scrub.value = '0';
+  scrubVal.textContent = fmtTime(0);
+
+  try{
+    midi=new Midi(await f.arrayBuffer());
+  }catch(err){
+    log.textContent="❌ 解析失敗："+err;
+    return;
+  }
+
+  parts.forEach(p=>p.dispose()); parts=[];
+  synths = midi.tracks.map(()=>piano);
+  if(!liveSynth) liveSynth = piano;
+
+  V.notesAll=[]; let gmin=999,gmax=0;
+  const bpm=(midi.header.tempos[0]?.bpm)||120;
+  const sig=midi.header.timeSignatures[0]?.timeSignature || midi.header.timeSignatures[0] || [4,4];
+  const [num,den]=sig; V.barSeconds=(60/bpm)*4*(num/den);
+
+  midi.tracks.forEach((t,ti)=>{
+    const events = t.notes.map(n=>({
+      time:n.time, dur:n.duration, end:n.time+n.duration,
+      midi:n.midi, vel:n.velocity, name:n.name
+    }));
+    events.forEach(ev=>{
+      V.notesAll.push(ev);
+      gmin=Math.min(gmin,ev.midi); gmax=Math.max(gmax,ev.midi);
+    });
+    const part=new Tone.Part((time,ev)=>{
+      const noteName = midiToName(ev.midi);
+      synths[ti].triggerAttackRelease(
+        noteName,
+        ev.dur, time, ev.vel
+      );
+      pushVisual(ev.midi, ev.vel, ev.dur);
+      flashKey(ev.midi, ev.dur);
+    }, events).start(0);
+    part.loop=false; parts.push(part);
+  });
+
+  if(gmin<999){
+    V.midiMin=Math.max(21,gmin-2);
+    V.midiMax=Math.min(108,gmax+2);
+  }
+  V.notesAll.sort((a,b)=>a.time-b.time);
+
+  const total = V.notesAll.length ? Math.max(...V.notesAll.map(n=>n.end)) : 0;
+  V.totalSeconds = total;
+  scrub.max = (total||0).toFixed(3);
+  scrub.value = '0';
+  scrub.step = '0.001';
+  scrub.disabled = !(total>0);
+  scrubVal.textContent = fmtTime(0);
+
+  play.disabled=false;
+  stopBtn.disabled=false;
+  log.textContent="✅ 讀取完成："+f.name+"（按 ▶️ 播放 或直接彈下方鋼琴）";
+};
+
+
+play.onclick=async()=>{
+  if(!(await ensureAudio())) return;
+
+  const startAt = scrub.disabled ? 0 : parseFloat(scrub.value)||0;
+
+  Tone.Transport.stop();
+  Tone.Transport.seconds = startAt;
+  liveClockStart = Tone.now() - startAt;
+
+  Tone.Transport.start("+0.03");
+  usePreview = false;
+  log.textContent="▶️ 播放中";
+};
+
+stopBtn.onclick=()=>{
+  Tone.Transport.stop();
+  usePreview = true;
+  previewSec = parseFloat(scrub.value)||0;
+  resetLiveClock();
+  log.textContent="⏹ 停止";
+};
+
+/* ---------- p5 的畫面 ---------- */
+const V={
+  notesAll:[],
+  activeNotes:[],
+  liveOverlay:[],
+  particles:[],
+  mode:'pulse',
+  midiMin:48,
+  midiMax:95,
+  barSeconds:2,
+  totalSeconds:0,
+
+  // 蝴蝶 / 蜻蜓
+  cuteQueue:[],   cuteButterflies:[],
+  glowQueue:[],   glowButterflies:[],
+  patternQueue:[],patternButterflies:[],
+
+  // 雨
+  rainQueue:[],
+  rainDrops:[],
+  rainRipples:[],
+
+  // 雪
+  snowBG:[],
+  snowHits:[],
+  snowQueue:[],
+
+  // 雪：城市夜景
+  snowCityBG:[],
+  snowCityQueue:[],
+  snowCityNoteSnow:[],
+  snowCityWindowFlashes:[],
+  snowCityWindowSlots:[]
+};
+
+new p5(p=>{
+  let W, H;
+  const stage = document.querySelector('#stage');
+
+  function sizeFromContainer(){
+    W = stage.clientWidth;
+    const vkbH = (vkbBottom.style.display==='block') ? vkbBottom.offsetHeight : 0;
+    H = Math.max(120, stage.clientHeight - vkbH);
+  }
+
+  p.setup=()=>{
+    sizeFromContainer();
+    const c=p.createCanvas(W,H);
+    c.parent('canvas-wrap');
+  };
+  p.windowResized=()=>{
+    sizeFromContainer();
+    p.resizeCanvas(W,H);
+  };
+  new ResizeObserver(()=>{
+    sizeFromContainer();
+    p.resizeCanvas(W,H);
+  }).observe(vkbBottom);
+
+  p.draw=()=>{
+    p.background(11,15,20);
+    if(V.mode==='pulse') drawPulse(p,W,H);
+    else if(V.mode==='piano') drawPianoRoll(p,W,H);
+    else if(V.mode==='stars') drawStars(p,W,H);
+    else if(V.mode==='field') drawField(p,W,H);
+    else if(V.mode==='snow') drawSnow(p,W,H);
+    else if(V.mode==='snowCity') drawSnowCity(p,W,H);
+    else if(V.mode==='butterflyCute') drawButterflyCute(p,W,H);
+    else if(V.mode==='butterflyGlow') drawButterflyGlow(p,W,H);
+    else if(V.mode==='butterflyPattern') drawButterflyPattern(p,W,H);
+    else if(V.mode==='rain') drawRain(p,W,H,false);
+    else if(V.mode==='rainRipple') drawRain(p,W,H,true);
+  };
+
+  function drawPulse(p,w,h){
+    const now = Tone.now();
+    const recent = V.activeNotes.filter(n => (now - n.time) < 0.14);
+    let avgVel = recent.length ? recent.reduce((a,b)=>a+b.vel,0)/recent.length : 0;
+    const baseR = Math.min(w, h) * 0.18;
+    const r = baseR + recent.length * 12 + avgVel * 90;
+
+    p.noFill(); p.stroke(121,192,255); p.strokeWeight(4);
+    p.circle(w/2, h/2, r*2);
+
+    for(const n of recent){
+      const hue = (n.midi % 12) * 30;
+      const [rC,gC,bC] = hslToRgb(hue/360, 0.6, 0.6);
+      const a = Math.round(150 + (n.vel||0) * 100);
+      p.stroke(rC,gC,bC, a); p.strokeWeight(2);
+      const rr = baseR*0.5 + (n.midi%12)*5 + (n.vel||0)*8;
+      p.circle(w/2, h/2, rr*2);
+    }
+  }
+
+  function drawPianoRoll(p,w,h){
+    const pxPerSec = parseInt(pxPerSecEl.value,10);
+    const playX = Math.floor(w/3);
+    const curSec = timelineSeconds();
+    const winStart = curSec - playX/pxPerSec;
+    const winEnd = winStart + w/pxPerSec;
+
+    const rows = Math.max(1, V.midiMax - V.midiMin + 1);
+    const rowH = h / rows;
+    const leftKeyW = 0;
+    const vw = w - leftKeyW;
+
+    p.push();
+    p.translate(leftKeyW, 0);
+
+    p.stroke(50,50,60,160); p.strokeWeight(1);
+    for(let m=V.midiMin; m<=V.midiMax; m++){
+      const y = Math.round((V.midiMax - m)*rowH)+0.5;
+      p.line(0,y,vw,y);
+    }
+
+    const t0 = Math.floor(winStart);
+    for(let t=t0; t<=winEnd; t++){
+      const x = (t - winStart)*pxPerSec + 0.5;
+      const barLen = V.barSeconds || 2;
+      if (Math.abs((t % barLen)) < 1e-3) {
+        p.stroke(120,160,230,220); p.strokeWeight(2);
+      } else {
+        p.stroke(70,80,100,180); p.strokeWeight(1);
+      }
+      p.line(x,0,x,h);
+    }
+
+    p.noStroke();
+    for(const n of V.notesAll){
+      if(n.end < winStart || n.time > winEnd) continue;
+      const x = (n.time - winStart) * pxPerSec;
+      const wRect = Math.max(2, n.dur * pxPerSec);
+      const y = (V.midiMax - n.midi) * rowH + 2;
+      const hue = (n.midi % 12) * 30;
+      const [rC,gC,bC] = hslToRgb(hue/360, 0.55, 0.62);
+      const alpha = Math.round(140 + (n.vel||0)*100);
+      p.fill(rC,gC,bC, alpha);
+      p.rect(x, y, wRect, rowH-4, 0);
+
+      if (wRect > 34 && rowH > 12){
+        p.fill(10,10,15, 230);
+        p.textSize(Math.min(12, rowH-4));
+        p.textAlign(p.LEFT, p.CENTER);
+        p.text(n.name || midiToName(n.midi), x+4, y + (rowH-4)/2);
+      }
+    }
+
+    for(let i=V.liveOverlay.length-1;i>=0;i--){
+      const ln = V.liveOverlay[i];
+      const st = ln.start, ed = (ln.end ?? timelineSeconds());
+      if (ed < winStart) { V.liveOverlay.splice(i,1); continue; }
+      const x = (st - winStart) * pxPerSec;
+      const wRect = Math.max(2, (ed - st) * pxPerSec);
+      const y = (V.midiMax - ln.midi) * rowH + 4;
+      p.noStroke();
+      p.fill(246,193,119, 220);
+      p.rect(x, y, wRect, rowH-8, 0);
+    }
+
+    p.stroke(246,193,119); p.strokeWeight(2);
+    p.line((playX)+0.5, 0, (playX)+0.5, h);
+
+    p.pop();
+  }
+
+  /* ---------- 星塵（test16 現在版本：彩色有尾巴） ---------- */
+  function drawStars(p, vw, vh){
+    const newly = V.activeNotes.splice(0);
+    for (const n of newly){
+      const hue = (n.midi % 12) * 30;
+      const col = hslToRgb(hue/360, 0.9, 0.6);
+      const angle = p.random(p.TWO_PI);
+      const speed = p.map(n.midi, V.midiMin, V.midiMax, 0.5, 5, true);
+
+      V.particles.push({
+        x: vw/2,
+        y: vh/2,
+        vx: Math.cos(angle) * speed * 2,
+        vy: Math.sin(angle) * speed * 2,
+        life: 1.0,
+        r: p.map(n.vel || 0.7, 0, 1, 3, 8),
+        col
+      });
+    }
+
+    for (let i = V.particles.length - 1; i >= 0; i--){
+      const pt = V.particles[i];
+      pt.x += pt.vx;
+      pt.y += pt.vy;
+      pt.life -= 0.014;
+
+      if (
+        pt.life <= 0 ||
+        pt.x < -80 || pt.x > vw + 80 ||
+        pt.y < -80 || pt.y > vh + 80
+      ){
+        V.particles.splice(i, 1);
+        continue;
+      }
+
+      const baseAlpha = 255 * Math.max(pt.life, 0);
+      const baseR = pt.r;
+
+      p.noStroke();
+
+      const steps = 10;
+      const tailScale = 0.6;
+      for (let s = 0; s < steps; s++){
+        const t = s / steps;
+        const xx = pt.x - pt.vx * s * tailScale;
+        const yy = pt.y - pt.vy * s * tailScale;
+        const a  = baseAlpha * (1 - t);
+        const rr = baseR * (1 - t * 0.8);
+
+        p.fill(pt.col[0], pt.col[1], pt.col[2], a);
+        p.circle(xx, yy, rr * 2);
+      }
+
+      p.fill(255, 255, 255, baseAlpha * 0.8);
+      p.circle(pt.x, pt.y, baseR * 0.9);
+    }
+  }
+
+  const field=Array.from({length:300},()=>({
+    x:Math.random()*window.innerWidth,
+    y:Math.random()*window.innerHeight*0.7,
+    vx:0,vy:0
+  }));
+  function drawField(p,w,h){
+    for(const f of field){
+      f.x+=f.vx; f.y+=f.vy;
+      if(f.x<0||f.x>w)f.vx*=-1;
+      if(f.y<0||f.y>h)f.vy*=-1;
+      f.vx*=0.98; f.vy*=0.98;
+      p.noStroke(); 
+      p.fill(121,192,255,200); 
+      p.circle(f.x,f.y,4);
+    }
+    if(V.activeNotes.length>0){ 
+      field.forEach(pt=>{
+        pt.vx+=Math.random()*4-2;
+        pt.vy+=Math.random()*4-2;
+      }); 
+      V.activeNotes=[]; 
+    }
+  }
+
+  /* ---------- 下雪模式 ---------- */
+  function initSnowBG(p,w,h){
+    if (V.snowBG.length) return;
+    const count = 160;
+    for(let i=0;i<count;i++){
+      V.snowBG.push({
+        x: Math.random()*w,
+        y: Math.random()*h,
+        r: p.random(1.3,3.0),
+        vy: p.random(0.3,1.1),
+        drift: p.random(-0.25,0.25),
+        phase: p.random(p.TWO_PI)
+      });
+    }
+  }
+
+  function drawSnow(p,w,h){
+    initSnowBG(p,w,h);
+    p.noStroke();
+    for(const flake of V.snowBG){
+      flake.y += flake.vy;
+      flake.x += flake.drift + Math.sin(flake.phase)*0.18;
+      flake.phase += 0.01;
+
+      if (flake.y > h+10){
+        flake.y = -10;
+        flake.x = p.random(0,w);
+      }
+      if (flake.x < -10) flake.x = w+10;
+      if (flake.x > w+10) flake.x = -10;
+
+      p.fill(235,240,250,180);
+      p.circle(flake.x,flake.y,flake.r*2);
+    }
+
+    const fresh = V.snowQueue.splice(0);
+    for(const n of fresh){
+      const strong = n.vel || 0.7;
+      const baseX = p.map(n.midi, V.midiMin, V.midiMax, w*0.15, w*0.85, true);
+      const group = 3 + Math.floor(strong*3);
+
+      for(let i=0;i<group;i++){
+        V.snowHits.push({
+          x: baseX + p.random(-14,14),
+          y: p.random(h*0.18, h*0.45),
+          vy: p.random(0.7,1.6) + strong*1.1,
+          r: p.map(strong,0,1,3.5,6.5)*p.random(0.85,1.15),
+          life: 1,
+          phase: p.random(p.TWO_PI),
+          sway: p.random(0.4,0.9)
+        });
+      }
+    }
+
+    for(let i=V.snowHits.length-1;i>=0;i--){
+      const s = V.snowHits[i];
+      s.y += s.vy;
+      s.phase += 0.04;
+      s.x += Math.sin(s.phase) * s.sway;
+      s.life -= 0.016;
+
+      if (s.life<=0 || s.y > h+20){
+        V.snowHits.splice(i,1);
+        continue;
+      }
+
+      const a = 220 * s.life;
+
+      p.noStroke();
+      p.fill(200,220,255,a*0.45);
+      p.circle(s.x,s.y,s.r*2.4);
+
+      p.fill(240,248,255,a);
+      p.circle(s.x,s.y,s.r*1.4);
+    }
+  }
+
+  /* ---------- 雪：城市夜景 ---------- */
+  function initSnowCityBG(p,w,h){
+    if (V.snowCityBG.length) return;
+    const count = 140;
+    for(let i=0;i<count;i++){
+      V.snowCityBG.push({
+        x: Math.random()*w,
+        y: Math.random()*h*0.85,
+        r: p.random(1.8,3.6),
+        vy: p.random(0.35,0.9),
+        drift: p.random(-0.25,0.25),
+        phase: p.random(p.TWO_PI)
+      });
+    }
+  }
+
+  function drawSnowCity(p,w,h){
+    const horizonY = h * 0.42;
+    const riverH   = h * 0.22;
+    const riverTop = horizonY;
+    const riverBottom = riverTop + riverH;
+    const groundTop = riverTop - h*0.03;
+    const pathTop  = riverBottom;
+    const pathBottom = h;
+
+    const lampX = w * 0.78;
+    const lampBaseY = pathBottom - 6;
+    const lampTopY  = pathTop + (pathBottom - pathTop) * 0.25;
+    const lampHeadY = lampTopY - 8;
+
+    /* --- 天空漸層 --- */
+    p.noStroke();
+    for(let y=0; y<h; y+=4){
+      const t = y / h;
+      const r = 10 + 8*t;
+      const g = 14 + 16*t;
+      const b = 24 + 26*t;
+      p.fill(r,g,b);
+      p.rect(0,y,w,4);
+    }
+
+    /* --- 城市建築剪影 --- */
+    V.snowCityWindowSlots = [];
+    p.push();
+    p.noStroke();
+    p.randomSeed(20251126);
+    const baseY = groundTop;
+    const buildingCount = 8;
+    const usableWidth = w * 0.9;
+    const startX = w * 0.05;
+    const gap = usableWidth / buildingCount;
+    let bx = startX;
+
+    for(let i=0;i<buildingCount;i++){
+      let bw = gap * p.random(0.85,1.1);
+      const bh = p.random(h*0.18, h*0.3);
+      if (bx + bw > w*0.95){
+        bw = w*0.95 - bx;
+      }
+      const topY = baseY - bh;
+
+      p.fill(18,22,34,255);
+      p.rect(bx, topY, bw, bh+4);
+
+      const isTri = p.random() < 0.55;
+      if(isTri){
+        p.triangle(
+          bx, topY,
+          bx + bw/2, topY - bh*0.25,
+          bx + bw, topY
+        );
+      }
+
+      const cols = Math.max(1, Math.floor(bw/22));
+      const rows = Math.max(1, Math.floor(bh/24));
+      for(let cy=0; cy<rows; cy++){
+        for(let cx=0; cx<cols; cx++){
+          if (p.random() < 0.35){
+            const cellW = (bw-18)/cols;
+            const cellH = (bh-16)/rows;
+            const ww = Math.min(10, cellW*0.9);
+            const wh = Math.min(13, cellH*0.9);
+            const wx = bx + 6 + cx*cellW + (cellW-ww)*0.5;
+            const wy = topY + 8 + cy*cellH + (cellH-wh)*0.5;
+            p.fill(230,210,170,70);
+            p.rect(wx, wy, ww, wh, 2);
+            V.snowCityWindowSlots.push({x:wx,y:wy,w:ww,h:wh});
+          }
+        }
+      }
+
+      bx += gap;
+    }
+    p.pop();
+
+    /* --- 城市與河之間的岸邊 --- */
+    p.noStroke();
+    p.fill(19,23,35,255);
+    p.rect(0, groundTop, w, riverTop-groundTop);
+
+    /* --- 河面 --- */
+    p.noStroke();
+    p.fill(12,22,40,240);
+    p.rect(0, riverTop, w, riverH+1);
+
+    /* --- 房子燈光倒影 --- */
+    p.noStroke();
+    for(const slot of V.snowCityWindowSlots){
+      const cx = slot.x + slot.w/2;
+      const topRef = riverTop + 4;
+      const bottomRef = riverTop + riverH*0.85;
+      const refWidth = slot.w * 0.6;
+      for(let yy=topRef; yy<bottomRef; yy+=4){
+        const t = (yy - topRef) / (bottomRef - topRef);
+        const a = 55 * (1 - t);
+        if (a <= 0) continue;
+        p.fill(240,220,180,a);
+        p.rect(cx - refWidth/2, yy, refWidth, 3);
+      }
+    }
+
+    /* --- 河岸步道 --- */
+    p.noStroke();
+    p.fill(20,26,38,255);
+    p.rect(0, pathTop, w, pathBottom-pathTop);
+
+    p.stroke(40,52,70,180);
+    p.strokeWeight(2);
+    p.line(0, pathTop + 10, w, pathTop + 10);
+    for(let x=0; x<w; x+=26){
+      p.line(x, pathTop+10, x, pathTop+26);
+    }
+
+    /* --- 路燈 --- */
+    p.stroke(30,36,50,255);
+    p.strokeWeight(3);
+    p.line(lampX, lampBaseY, lampX, lampTopY);
+    p.noStroke();
+    p.fill(26,30,42,255);
+    p.rect(lampX-10, lampTopY-6, 20, 6, 3);
+
+    const flicker = 1 + 0.10 * p.sin(p.frameCount*0.05);
+    const glowR = (36 + H*0.024) * flicker;
+
+    p.noStroke();
+    p.fill(255,245,210,230);
+    p.circle(lampX, lampHeadY, 8);
+
+    for(let k=3;k>=1;k--){
+      const a = 46 * k;
+      const r = glowR * (k/3);
+      p.fill(255,235,200, a);
+      p.circle(lampX, lampHeadY, r*2);
+    }
+
+    /* --- 背景雪 --- */
+    initSnowCityBG(p,w,h);
+    p.noStroke();
+    for(const fl of V.snowCityBG){
+      fl.y += fl.vy;
+      fl.x += fl.drift + Math.sin(fl.phase)*0.16;
+      fl.phase += 0.01;
+
+      if(fl.y > pathTop + 20){
+        fl.y = -12;
+        fl.x = Math.random()*w;
+      }
+      if(fl.x < -10) fl.x = w+10;
+      if(fl.x > w+10) fl.x = -10;
+
+      const dx = fl.x - lampX;
+      const dy = fl.y - lampHeadY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      let alpha = 120;
+      if(dist < glowR){
+        alpha += 70 * (1 - dist/glowR);
+      }
+      p.fill(230,240,255, alpha);
+      p.circle(fl.x, fl.y, fl.r*2);
+    }
+
+    /* --- 音符事件 --- */
+    const fresh = V.snowCityQueue.splice(0);
+    const hasSlots = V.snowCityWindowSlots.length > 0;
+    for(const n of fresh){
+      const vel = n.vel || 0.6;
+      const baseX = p.map(n.midi, V.midiMin, V.midiMax, w*0.12, w*0.88, true);
+      const count = 2 + Math.floor(vel*3);
+
+      for(let i=0;i<count;i++){
+        V.snowCityNoteSnow.push({
+          x: baseX + p.random(-18,18),
+          y: p.random(h*0.10, h*0.46),
+          vy: p.random(0.6,1.4) + vel*1.0,
+          r: p.map(vel,0,1,3,6)*p.random(0.85,1.2),
+          life: 1,
+          phase: p.random(p.TWO_PI),
+          sway: p.random(0.4,0.9)
+        });
+      }
+
+      if (hasSlots && n.midi >= 72){
+        const baseCount = 3 + Math.floor(vel*4);
+        const used = new Set();
+        for(let k=0;k<baseCount;k++){
+          let idx;
+          let guard = 0;
+          do {
+            idx = Math.floor(p.random(V.snowCityWindowSlots.length));
+            guard++;
+          } while(used.has(idx) && guard < 8);
+          used.add(idx);
+          V.snowCityWindowFlashes.push({slotIndex: idx, life:1});
+        }
+      }
+    }
+
+    for(let i=V.snowCityWindowFlashes.length-1;i>=0;i--){
+      const f = V.snowCityWindowFlashes[i];
+      f.life -= 0.05;
+      if(f.life <= 0){
+        V.snowCityWindowFlashes.splice(i,1);
+        continue;
+      }
+      const slot = V.snowCityWindowSlots[f.slotIndex];
+      if(!slot) continue;
+      const alpha = 220 * f.life;
+      p.noStroke();
+      p.fill(245,220,170, alpha);
+      p.rect(slot.x, slot.y, slot.w, slot.h, 3);
+    }
+
+    for(let i=V.snowCityNoteSnow.length-1;i>=0;i--){
+      const s = V.snowCityNoteSnow[i];
+      s.y += s.vy;
+      s.phase += 0.04;
+      s.x += Math.sin(s.phase) * s.sway;
+      s.life -= 0.018;
+
+      if (s.life<=0 || s.y > pathBottom+20){
+        V.snowCityNoteSnow.splice(i,1);
+        continue;
+      }
+
+      const a = 230 * s.life;
+      p.noStroke();
+      p.fill(200,220,255,a*0.45);
+      p.circle(s.x,s.y,s.r*2.4);
+      p.fill(240,248,255,a);
+      p.circle(s.x,s.y,s.r*1.4);
+    }
+  }
+
+  /* ---------- 雨模式 ---------- */
+  function drawRain(p, w, h, withRipples){
+    const fresh = V.rainQueue.splice(0);
+    for (const n of fresh){
+      const strength = n.vel || 0.5;
+      const dropCount = 1 + Math.floor(strength * 2);
+      const baseX = p.map(n.midi, V.midiMin, V.midiMax, 0, w, true);
+      const groundMin = h * 0.78;
+      const groundMax = h * 0.9;
+
+      for (let i = 0; i < dropCount; i++){
+        V.rainDrops.push({
+          x: baseX + p.random(-10, 10),
+          y: p.random(-80, -10),
+          vy: p.map(strength, 0, 1, 6, 18) * p.random(0.9, 1.1),
+          len: p.map(strength, 0, 1, 8, 24),
+          thick: p.map(strength, 0, 1, 1, 3),
+          life: 1,
+          hasHit: false,
+          groundY: withRipples
+            ? p.random(groundMin, groundMax)
+            : h + 120
+        });
+      }
+    }
+
+    for (let i = V.rainDrops.length - 1; i >= 0; i--){
+      const d = V.rainDrops[i];
+      d.y += d.vy;
+      d.life -= 0.015;
+      const alphaLine = d.life * 220;
+
+      if (withRipples && d.y + d.len >= d.groundY){
+        const strengthFactor = d.len;
+        V.rainRipples.push({
+          x: d.x,
+          y: d.groundY,
+          r: 0,
+          life: 1,
+          maxR: 20 + strengthFactor * 1.4
+        });
+        V.rainDrops.splice(i, 1);
+        continue;
+      }
+
+      if (d.y > h + 60 || alphaLine <= 0){
+        V.rainDrops.splice(i, 1);
+        continue;
+      }
+
+      p.stroke(160, 190, 255, alphaLine);
+      p.strokeWeight(d.thick);
+      p.line(d.x, d.y, d.x, d.y + d.len);
+    }
+
+    if (withRipples){
+      for (let i = V.rainRipples.length - 1; i >= 0; i--){
+        const r = V.rainRipples[i];
+        r.r += 1.6;
+        r.life -= 0.03;
+
+        const t = r.r / r.maxR;
+        const alpha = (1 - t) * r.life * 220;
+
+        if (r.life <= 0 || r.r >= r.maxR || alpha <= 0){
+          V.rainRipples.splice(i, 1);
+          continue;
+        }
+
+        p.noFill();
+        p.stroke(170, 200, 255, alpha);
+        p.strokeWeight(1.4);
+        p.circle(r.x, r.y, r.r * 2);
+
+        p.stroke(200, 220, 255, alpha * 0.5);
+        p.strokeWeight(0.9);
+        p.circle(r.x, r.y, r.r * 1.4);
+      }
+    }
+  }
+
+  /* ---------- 蝴蝶們 / 蜻蜓 ---------- */
+  function drawButterflyCute(p,w,h){
+    const fresh = V.cuteQueue.splice(0);
+    for(const n of fresh){
+      const x = p.map(n.midi, V.midiMin, V.midiMax, w*0.1, w*0.9, true);
+      const y = h*0.75 + p.random(-15,15);
+      const speed = p.map(n.vel,0,1,0.8,2.2);
+      const size = p.map(n.vel,0,1,16,30);
+      const hue = (n.midi % 12) * 30;
+      const rgb = hslToRgb(hue/360,0.6,0.6);
+      V.cuteButterflies.push({
+        x,y,
+        vx:p.random(-0.3,0.3),
+        vy:-speed,
+        size,
+        life:1,
+        phase:p.random(0,Math.PI*2),
+        color:rgb
+      });
+    }
+
+    for(let i=V.cuteButterflies.length-1;i>=0;i--){
+      const b = V.cuteButterflies[i];
+      b.x += b.vx;
+      b.y += b.vy;
+      b.phase += 0.2;
+      b.life -= 0.012;
+
+      if(b.life<=0 || b.y < -40 || b.x < -40 || b.x > w+40){
+        V.cuteButterflies.splice(i,1);
+        continue;
+      }
+
+      const [r,g,bl] = b.color;
+      const alpha = b.life*240;
+      const wingSpan = b.size;
+      const wingOffset = Math.sin(b.phase) * (b.size*0.5);
+      const bodyH = b.size*1.5;
+
+      p.noStroke();
+      p.fill(r,g,bl,alpha);
+      p.ellipse(b.x - wingSpan/2, b.y-4, wingSpan, wingSpan + wingOffset);
+      p.ellipse(b.x + wingSpan/2, b.y-4, wingSpan, wingSpan - wingOffset);
+
+      p.fill(245,240,255,alpha);
+      p.rect(b.x-2, b.y-bodyH/2, 4, bodyH, 4);
+
+      p.circle(b.x, b.y-bodyH/2-3, 5);
+
+      p.stroke(245,240,255,alpha);
+      p.strokeWeight(1);
+      p.line(b.x-1, b.y-bodyH/2-3, b.x-4, b.y-bodyH/2-8);
+      p.line(b.x+1, b.y-bodyH/2-3, b.x+4, b.y-bodyH/2-8);
+    }
+  }
+
+  function drawButterflyGlow(p,w,h){
+    const fresh = V.glowQueue.splice(0);
+    for(const n of fresh){
+      const x = p.map(n.midi, V.midiMin, V.midiMax, w*0.1, w*0.9, true);
+      const y = h*0.7 + p.random(-20,20);
+      const speed = p.map(n.vel,0,1,0.6,2.0);
+      const size = p.map(n.vel,0,1,12,26);
+      const hue = (n.midi % 12) * 30;
+      const rgb = hslToRgb(hue/360,0.7,0.7);
+      V.glowButterflies.push({
+        x,y,
+        vx:p.random(-0.4,0.4),
+        vy:-speed,
+        size,
+        life:1,
+        phase:p.random(0,Math.PI*2),
+        color:rgb
+      });
+    }
+
+    for(let i=V.glowButterflies.length-1;i>=0;i--){
+      const b = V.glowButterflies[i];
+      b.x += b.vx;
+      b.y += b.vy;
+      b.phase += 0.18;
+      b.life -= 0.01;
+
+      if (b.life<=0 || b.y < -40 || b.x < -40 || b.x > w+40){
+        V.glowButterflies.splice(i,1);
+        continue;
+      }
+
+      const [r,g,bl] = b.color;
+      const alpha = b.life*220;
+
+      const wingSpan = b.size;
+      const flutter = Math.sin(b.phase) * (b.size*0.6);
+
+      p.noStroke();
+      for(let k=3;k>=1;k--){
+        const a2 = alpha*(0.18*k);
+        p.fill(r,g,bl,a2);
+        const rad = wingSpan * (1.1 + k*0.25);
+        p.ellipse(b.x - wingSpan/2, b.y-4, rad, rad+flutter);
+        p.ellipse(b.x + wingSpan/2, b.y-4, rad, rad-flutter);
+      }
+      p.fill(240,240,255,alpha);
+      p.rect(b.x-2, b.y-b.size*0.9, 4, b.size*1.6, 3);
+      p.fill(255,255,255,alpha);
+      p.circle(b.x, b.y-b.size*0.9, 3);
+    }
+  }
+
+  function drawButterflyPattern(p,w,h){
+    const fresh = V.patternQueue.splice(0);
+    for(const n of fresh){
+      const x = p.map(n.midi, V.midiMin, V.midiMax, w*0.1, w*0.9, true);
+      const y = h*0.72 + p.random(-15,15);
+      const speed = p.map(n.vel,0,1,0.7,1.8);
+      const size = p.map(n.vel,0,1,18,32);
+      const hue = (n.midi % 12) * 30;
+      const rgb = hslToRgb(hue/360,0.55,0.65);
+      V.patternButterflies.push({
+        x,y,
+        vx:p.random(-0.25,0.25),
+        vy:-speed,
+        size,
+        life:1,
+        phase:p.random(0,Math.PI*2),
+        color:rgb,
+        noiseSeed:p.random(1000)
+      });
+    }
+
+    for(let i=V.patternButterflies.length-1;i>=0;i--){
+      const b = V.patternButterflies[i];
+      b.x += b.vx;
+      b.y += b.vy;
+      b.phase += 0.15;
+      b.life -= 0.012;
+
+      if (b.life<=0 || b.y < -40 || b.x < -40 || b.x > w+40){
+        V.patternButterflies.splice(i,1);
+        continue;
+      }
+
+      const [r,g,bl] = b.color;
+      const alpha = b.life*230;
+      const s = b.size;
+
+      p.noStroke();
+      p.fill(230,230,245,alpha);
+      p.rect(b.x-2, b.y-s*0.9, 4, s*1.8, 3);
+
+      for(let layer=0; layer<4; layer++){
+        const t = layer/3;
+        const n1 = p.noise(b.noiseSeed + t*2 + b.phase*0.05);
+        const n2 = p.noise(b.noiseSeed + 10 + t*2 + b.phase*0.05);
+
+        const dxL = -s*(0.8 + t*0.4) - n1*4;
+        const dxR =  s*(0.8 + t*0.4) + n2*4;
+        const dy  = -s*(0.3 + t*0.1);
+
+        const a2 = alpha*(0.35 - t*0.07);
+        p.fill(r + layer*5, g + layer*4, bl + layer*3, a2);
+
+        p.ellipse(b.x + dxL, b.y + dy, s*(0.9+0.3*t), s*(0.7+0.2*t));
+        p.ellipse(b.x + dxR, b.y + dy, s*(0.9+0.3*t), s*(0.7+0.2*t));
+      }
+    }
+  }
+});
+
+/* ---------- 虛擬鋼琴 ---------- */
+const WHITE_PCS=[0,2,4,5,7,9,11];
+const BLACK_PCS=new Set([1,3,6,8,10]);
+const pressed=new Map();
+
+function midiToName(m){
+  const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const octave=Math.floor(m/12)-1;
+  return names[m%12]+octave;
+}
+
+vkbHeight.addEventListener('input', ()=>{
+  vkbHeightVal.textContent = vkbHeight.value;
+  document.querySelector('.vkbd-wrap').style.height = vkbHeight.value + 'px';
+  vkbdEl.style.height = vkbHeight.value + 'px';
+});
+
+function buildKeyboard(){
+  vkbdEl.innerHTML='';
+  document.querySelector('.vkbd-wrap').style.height = vkbHeight.value + 'px';
+  vkbdEl.style.height = vkbHeight.value + 'px';
+
+  const oStart=parseInt(octaveStart.value,10);
+  const oCount=parseInt(octaveCount.value,10);
+  octaveStartVal.textContent=oStart; 
+  octaveCountVal.textContent=oCount;
+
+  const midiStart = 12*(oStart+1);
+  const midiEnd   = 12*(oStart+oCount+1) - 1;
+  vkbRange.textContent = midiToName(midiStart)+'–'+midiToName(midiEnd);
+
+  if(!midi){
+    V.midiMin = midiStart;
+    V.midiMax = midiEnd;
+    V.barSeconds = 2;
+  }
+
+  const whiteWrap=document.createElement('div'); whiteWrap.className='white-keys';
+  const blackWrap=document.createElement('div'); blackWrap.className='black-keys';
+  vkbdEl.appendChild(whiteWrap); 
+  vkbdEl.appendChild(blackWrap);
+
+  const whiteList=[];
+  for(let m=midiStart; m<=midiEnd; m++){
+    if(!WHITE_PCS.includes(m%12)) continue;
+    const el=document.createElement('div');
+    el.className='key white'; 
+    el.dataset.midi=m;
+    addKeyEvents(el);
+    whiteWrap.appendChild(el);
+    whiteList.push({midi:m, el});
+  }
+  const whiteWidth = 100/whiteList.length;
+  for(let i=0;i<whiteList.length;i++){
+    const m = whiteList[i].midi;
+    const nextWhite = whiteList[i+1];
+    if(!nextWhite) continue;
+    const pc = (m%12);
+    if([0,2,5,7,9].includes(pc)){
+      const blackMidi = m+1; 
+      if(blackMidi>midiEnd || !BLACK_PCS.has(blackMidi%12)) continue;
+      const el=document.createElement('div');
+      el.className='key black'; 
+      el.dataset.midi=blackMidi;
+      const leftPct = (i+1)*whiteWidth - whiteWidth*0.35;
+      el.style.left = `calc(${leftPct}% - 8px)`;
+      addKeyEvents(el);
+      blackWrap.appendChild(el);
+    }
+  }
+}
+function addKeyEvents(el){
+  el.addEventListener('pointerdown',onKeyDown,{passive:false});
+  el.addEventListener('pointerenter',e=>{ if(e.buttons===1) onKeyDown(e);});
+  el.addEventListener('pointerup',onKeyUp);
+  el.addEventListener('pointercancel',onKeyUp);
+  el.addEventListener('pointerleave',onKeyUp);
+}
+
+async function onKeyDown(e){
+  e.preventDefault();
+  const ok = await ensureAudio(); if(!ok) return;
+
+  const el=e.target.closest('.key'); if(!el) return;
+  const midiNum=parseInt(el.dataset.midi,10);
+  const ptr = e.pointerId || 'mouse';
+  if(!pressed.has(ptr)) pressed.set(ptr,new Set());
+  const set=pressed.get(ptr);
+  if(set.has(midiNum)) return;
+  set.add(midiNum);
+
+  el.classList.add('playing','on');
+  const noteName = midiToName(midiNum);
+  liveSynth.triggerAttack(noteName, undefined, 0.95);
+
+  pushVisual(midiNum, 0.95, 0.25);
+  const t = timelineSeconds();
+  V.liveOverlay.push({midi:midiNum, start:t, end:null});
+
+  el.setPointerCapture && el.setPointerCapture(e.pointerId);
+}
+function onKeyUp(e){
+  const el=e.target.closest('.key'); if(!el) return;
+  const midiNum=parseInt(el.dataset.midi,10);
+  const ptr = e.pointerId || 'mouse';
+  const set=pressed.get(ptr); if(!set) return;
+  if(set.has(midiNum)){
+    set.delete(midiNum);
+    el.classList.remove('playing');
+    const noteName = midiToName(midiNum);
+    liveSynth && liveSynth.triggerRelease(noteName);
+
+    const now = timelineSeconds();
+    for(let i=V.liveOverlay.length-1;i>=0;i--){
+      if(V.liveOverlay[i].midi===midiNum && V.liveOverlay[i].end===null){
+        V.liveOverlay[i].end = now; break;
+      }
+    }
+    let stillOn=false;
+    pressed.forEach(s=>{ if(s.has(midiNum)) stillOn=true; });
+    if(!stillOn) el.classList.remove('on');
+  }
+}
+
+
+function pushVisual(midi, vel, dur){
+  const ev = {time:Tone.now(), midi, vel:vel||0.8, dur:dur||0.2, track:-1};
+  V.activeNotes.push(ev);
+
+  const base = {time:ev.time, midi:ev.midi, vel:ev.vel};
+
+  if (V.mode === 'butterflyCute')      V.cuteQueue.push(base);
+  else if (V.mode === 'butterflyGlow') V.glowQueue.push(base);
+  else if (V.mode === 'butterflyPattern') V.patternQueue.push(base);
+  else if (V.mode === 'rain' || V.mode === 'rainRipple') V.rainQueue.push(base);
+  else if (V.mode === 'snow') V.snowQueue.push(base);
+  else if (V.mode === 'snowCity') V.snowCityQueue.push(base);
+}
+
+function flashKey(midi, dur=0.15){
+  const key = vkbdEl.querySelector(`.key[data-midi="${midi}"]`);
+  if(!key) return;
+  key.classList.add('on','playing');
+  setTimeout(()=>key.classList.remove('playing'), Math.max(80, dur*1000*0.6));
+  setTimeout(()=>{
+    let stillOn=false;
+    pressed.forEach(s=>{ if(s.has(midi)) stillOn=true; });
+    if(!stillOn) key.classList.remove('on');
+  }, Math.max(120, dur*1000));
+}
+
+
+setInterval(()=>{
+  if (Tone.Transport.state === 'started' && !isScrubbing && !scrub.disabled){
+    const tVis = timelineSeconds();
+    const total = V.totalSeconds || 0;
+
+    if (total > 0 && tVis >= total){
+      Tone.Transport.stop();
+      usePreview = true;
+      previewSec = 0;
+      scrub.value = '0';
+      scrubVal.textContent = fmtTime(0);
+      liveClockStart = null;
+      log.textContent = '⏹ 播放結束';
+      return;
+    }
+
+    const t = Math.max(0, Math.min(tVis, total || tVis));
+    scrub.value = t.toFixed(3);
+    scrubVal.textContent = fmtTime(t);
+  }
+}, 50);
+
+scrub.addEventListener('input', ()=>{
+  isScrubbing = true;
+  const t = parseFloat(scrub.value)||0;
+  scrubVal.textContent = fmtTime(t);
+  if (Tone.Transport.state !== 'started'){
+    usePreview = true;
+    previewSec = t;
+  }
+});
+
+['change','pointerup','mouseup','touchend'].forEach(evt=>{
+  scrub.addEventListener(evt, ()=>{
+    const t = parseFloat(scrub.value)||0;
+    if (Tone.Transport.state === 'started'){
+      Tone.Transport.seconds = t;
+      liveClockStart = Tone.now() - t;
+    }else{
+      usePreview = true;
+      previewSec = t;
+    }
+    isScrubbing = false;
+    scrubVal.textContent = fmtTime(t);
+  });
+});
+
+function fmtTime(sec){
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec/60), s = sec%60;
+  return `${m}:${s.toString().padStart(2,'0')}`;
+}
+
+
+vkbHeight.addEventListener('input', ()=>{
+  vkbHeightVal.textContent=vkbHeight.value;
+  document.querySelector('.vkbd-wrap').style.height=vkbHeight.value+'px';
+  vkbdEl.style.height=vkbHeight.value+'px';
+});
+octaveStart.addEventListener('input', buildKeyboard);
+octaveCount.addEventListener('input', buildKeyboard);
+buildKeyboard();
+
+
+function hslToRgb(h, s, l){
+  const a = s * Math.min(l, 1 - l);
+  const f = (n, k=(n + h*12)%12) => l - a * Math.max(Math.min(k-3, 9-k, 1), -1);
+  return [
+    Math.round(f(0)*255),
+    Math.round(f(8)*255),
+    Math.round(f(4)*255)
+  ];
+}
+</script>
+</body>
+</html>
