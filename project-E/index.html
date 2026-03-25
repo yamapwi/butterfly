@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tai Chi</title>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #eef3f6;
+    }
+
+    #videoWrap {
+      display: none;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="videoWrap">
+    <video id="input_video" playsinline></video>
+  </div>
+
+  <script>
+    let poseLandmarks = null;
+    let fishes = [];
+    let inkDust = [];
+    let handTrails = [];
+    let poseReady = false;
+
+    const FIGURE_SCALE = 0.78;
+    const FISH_COUNT = 290;
+
+    let prevLeftWrist = null;
+    let prevRightWrist = null;
+    let leftHandVelocity = { x: 0, y: 0 };
+    let rightHandVelocity = { x: 0, y: 0 };
+
+    let twoHandModeHold = 0;
+    let twoHandCircleActive = false;
+
+    const POSE_CONNECTIONS_LIST = [
+      [11, 12],
+      [11, 13],
+      [13, 15],
+      [12, 14],
+      [14, 16],
+      [11, 23],
+      [12, 24],
+      [23, 24],
+      [23, 25],
+      [25, 27],
+      [24, 26],
+      [26, 28]
+    ];
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      pixelDensity(1);
+
+      bgm = new Audio('music.mp3');
+      bgm.loop = true;
+      bgm.volume = 0.5;
+
+      bgm.play().catch(() => {
+        window.addEventListener('click', () => {
+          bgm.play();
+        }, { once: true });
+      });
+
+      for (let i = 0; i < 240; i++) {
+        inkDust.push({
+          x: random(width),
+          y: random(height),
+          r: random(8, 36),
+          a: random(8, 22)
+        });
+      }
+
+      for (let i = 0; i < FISH_COUNT; i++) {
+        fishes.push(new Fish(random(width), random(height)));
+      }
+
+      setupMediaPipe();
+    }
+
+    function draw() {
+      drawPaperBackground();
+      updateHandState();
+      updateTwoHandMode();
+      updateHandTrails();
+
+      for (let f of fishes) {
+        f.applyAmbientFlow();
+        f.applyBodySwirl();
+        f.applyHandDirectionalFlow();
+        f.applyTwoHandField();
+        f.update();
+        f.wrapSoft();
+      }
+
+      drawHandTrails();
+
+      if (poseLandmarks) {
+        drawWatercolorFigure();
+      }
+
+      for (let f of fishes) {
+        f.display();
+      }
+
+      if (poseLandmarks) {
+        drawPoseSkeleton();
+        drawPosePoints();
+      }
+
+    }
+
+    function drawPaperBackground() {
+      background(236, 241, 245);
+
+      noStroke();
+      for (let d of inkDust) {
+        fill(255, 255, 255, d.a);
+        ellipse(d.x, d.y, d.r, d.r * random(0.85, 1.2));
+      }
+
+      for (let i = 0; i < 4; i++) {
+        fill(200, 215, 225, 10);
+        ellipse(
+          width * 0.5,
+          height * 0.8,
+          width * (0.6 + i * 0.15),
+          height * (0.28 + i * 0.03)
+        );
+      }
+    }
+
+    function drawCornerHint() {
+      noStroke();
+      fill(60, 75, 90, 105);
+      textSize(14);
+      textAlign(LEFT, TOP);
+
+      let msg = poseReady
+        ? "單手：近場強 + 遠場弱導向；雙手畫圈/太極：較穩定觸發迴游"
+        : "正在啟動攝影機 / 人體偵測...";
+      text(msg, 18, 18);
+    }
+
+    function updateHandState() {
+      if (!poseLandmarks) return;
+
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+
+      if (lw && prevLeftWrist) {
+        leftHandVelocity.x = lerp(leftHandVelocity.x, lw.x - prevLeftWrist.x, 0.35);
+        leftHandVelocity.y = lerp(leftHandVelocity.y, lw.y - prevLeftWrist.y, 0.35);
+      } else {
+        leftHandVelocity.x *= 0.8;
+        leftHandVelocity.y *= 0.8;
+      }
+
+      if (rw && prevRightWrist) {
+        rightHandVelocity.x = lerp(rightHandVelocity.x, rw.x - prevRightWrist.x, 0.35);
+        rightHandVelocity.y = lerp(rightHandVelocity.y, rw.y - prevRightWrist.y, 0.35);
+      } else {
+        rightHandVelocity.x *= 0.8;
+        rightHandVelocity.y *= 0.8;
+      }
+
+      prevLeftWrist = lw ? { x: lw.x, y: lw.y } : null;
+      prevRightWrist = rw ? { x: rw.x, y: rw.y } : null;
+    }
+
+    function updateTwoHandMode() {
+      if (detectTwoHandCircleGestureLoose()) {
+        twoHandModeHold = 16;
+      } else {
+        twoHandModeHold = max(0, twoHandModeHold - 1);
+      }
+
+      twoHandCircleActive = twoHandModeHold > 0;
+    }
+
+    function updateHandTrails() {
+      if (!poseLandmarks) return;
+
+      let leftWrist = getScaledPoint(15);
+      let rightWrist = getScaledPoint(16);
+
+      if (leftWrist) {
+        handTrails.push({
+          x: leftWrist.x,
+          y: leftWrist.y,
+          life: 42,
+          side: "L"
+        });
+      }
+
+      if (rightWrist) {
+        handTrails.push({
+          x: rightWrist.x,
+          y: rightWrist.y,
+          life: 42,
+          side: "R"
+        });
+      }
+
+      for (let i = handTrails.length - 1; i >= 0; i--) {
+        handTrails[i].life--;
+        if (handTrails[i].life <= 0) handTrails.splice(i, 1);
+      }
+    }
+
+    function drawHandTrails() {
+      noFill();
+
+      for (let i = 1; i < handTrails.length; i++) {
+        let a = handTrails[i - 1];
+        let b = handTrails[i];
+        if (a.side !== b.side) continue;
+
+        let alpha = map(min(a.life, b.life), 0, 42, 0, 58);
+        strokeWeight(map(min(a.life, b.life), 0, 42, 1, 4.2));
+
+        if (a.side === "L") {
+          stroke(105, 160, 205, alpha);
+        } else {
+          stroke(88, 145, 195, alpha);
+        }
+
+        line(a.x, a.y, b.x, b.y);
+      }
+    }
+
+    function drawWatercolorFigure() {
+      let nose = getScaledPoint(0);
+      let leftShoulder = getScaledPoint(11);
+      let rightShoulder = getScaledPoint(12);
+      let leftElbow = getScaledPoint(13);
+      let rightElbow = getScaledPoint(14);
+      let leftWrist = getScaledPoint(15);
+      let rightWrist = getScaledPoint(16);
+      let leftHip = getScaledPoint(23);
+      let rightHip = getScaledPoint(24);
+      let leftKnee = getScaledPoint(25);
+      let rightKnee = getScaledPoint(26);
+      let leftAnkle = getScaledPoint(27);
+      let rightAnkle = getScaledPoint(28);
+
+      if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return;
+
+      let shoulderCenter = midPoint(leftShoulder, rightShoulder);
+      let hipCenter = midPoint(leftHip, rightHip);
+      let bodyScale = dist(leftShoulder.x, leftShoulder.y, rightShoulder.x, rightShoulder.y);
+
+      drawWatercolorHead(nose, shoulderCenter, bodyScale);
+      drawWatercolorTorso(leftShoulder, rightShoulder, leftHip, rightHip, shoulderCenter, hipCenter, bodyScale);
+      drawWatercolorLimb(leftShoulder, leftElbow, leftWrist, bodyScale * 0.12);
+      drawWatercolorLimb(rightShoulder, rightElbow, rightWrist, bodyScale * 0.12);
+      drawWatercolorLimb(leftHip, leftKnee, leftAnkle, bodyScale * 0.13);
+      drawWatercolorLimb(rightHip, rightKnee, rightAnkle, bodyScale * 0.13);
+    }
+
+    function drawWatercolorHead(nose, shoulderCenter, bodyScale) {
+      if (!nose || !shoulderCenter) return;
+
+      let headX = nose.x;
+      let headY = nose.y - bodyScale * 0.10;
+      let w = bodyScale * 0.42;
+      let h = bodyScale * 0.54;
+
+      noStroke();
+      fill(65, 78, 92, 14);
+      ellipse(headX + 2, headY + 2, w * 1.28, h * 1.24);
+
+      fill(70, 84, 98, 18);
+      ellipse(headX - 1, headY + 1, w * 1.12, h * 1.08);
+
+      fill(78, 94, 108, 22);
+      ellipse(headX, headY, w, h);
+
+      fill(255, 255, 255, 10);
+      ellipse(headX - w * 0.08, headY - h * 0.08, w * 0.45, h * 0.32);
+    }
+
+    function drawWatercolorTorso(leftShoulder, rightShoulder, leftHip, rightHip, shoulderCenter, hipCenter, bodyScale) {
+      if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return;
+
+      noStroke();
+
+      fill(86, 108, 126, 10);
+      beginShape();
+      vertex(leftShoulder.x - bodyScale * 0.12, leftShoulder.y);
+      vertex(rightShoulder.x + bodyScale * 0.12, rightShoulder.y);
+      vertex(rightHip.x + bodyScale * 0.10, rightHip.y + bodyScale * 0.03);
+      vertex(leftHip.x - bodyScale * 0.10, leftHip.y + bodyScale * 0.03);
+      endShape(CLOSE);
+
+      fill(88, 112, 132, 14);
+      beginShape();
+      vertex(leftShoulder.x - bodyScale * 0.08, leftShoulder.y + bodyScale * 0.02);
+      vertex(rightShoulder.x + bodyScale * 0.08, rightShoulder.y + bodyScale * 0.02);
+      vertex(rightHip.x + bodyScale * 0.06, rightHip.y);
+      vertex(leftHip.x - bodyScale * 0.06, leftHip.y);
+      endShape(CLOSE);
+
+      fill(92, 118, 138, 18);
+      beginShape();
+      vertex(leftShoulder.x - bodyScale * 0.04, leftShoulder.y + bodyScale * 0.02);
+      vertex(rightShoulder.x + bodyScale * 0.04, rightShoulder.y + bodyScale * 0.02);
+      vertex(rightHip.x + bodyScale * 0.03, rightHip.y);
+      vertex(leftHip.x - bodyScale * 0.03, leftHip.y);
+      endShape(CLOSE);
+
+      strokeCap(ROUND);
+      stroke(105, 128, 146, 18);
+      strokeWeight(bodyScale * 0.08);
+      line(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y);
+    }
+
+    function drawWatercolorLimb(a, b, c, thick) {
+      if (!a || !b || !c) return;
+
+      noFill();
+      strokeCap(ROUND);
+      strokeJoin(ROUND);
+
+      for (let i = 0; i < 4; i++) {
+        stroke(92, 112, 130, 10);
+        strokeWeight(thick * random(1.2, 1.6));
+        beginShape();
+        curveVertex(a.x + random(-3, 3), a.y + random(-3, 3));
+        curveVertex(a.x + random(-3, 3), a.y + random(-3, 3));
+        curveVertex(b.x + random(-4, 4), b.y + random(-4, 4));
+        curveVertex(c.x + random(-4, 4), c.y + random(-4, 4));
+        curveVertex(c.x + random(-4, 4), c.y + random(-4, 4));
+        endShape();
+      }
+
+      stroke(108, 132, 150, 22);
+      strokeWeight(thick);
+      beginShape();
+      curveVertex(a.x, a.y);
+      curveVertex(a.x, a.y);
+      curveVertex(b.x, b.y);
+      curveVertex(c.x, c.y);
+      curveVertex(c.x, c.y);
+      endShape();
+    }
+
+    function drawPoseSkeleton() {
+      strokeCap(ROUND);
+      strokeJoin(ROUND);
+
+      for (let pair of POSE_CONNECTIONS_LIST) {
+        let a = getScaledPoint(pair[0]);
+        let b = getScaledPoint(pair[1]);
+        if (!a || !b) continue;
+
+        stroke(125, 150, 172, 90);
+        strokeWeight(1.8);
+        line(a.x, a.y, b.x, b.y);
+      }
+    }
+
+    function drawPosePoints() {
+      noStroke();
+
+      for (let i = 0; i < poseLandmarks.length; i++) {
+        let p = getScaledPoint(i);
+        if (!p) continue;
+
+        let r = 3.5;
+        let alpha = 95;
+
+        if (i === 15 || i === 16) {
+          r = 5.8;
+          alpha = 165;
+          fill(88, 152, 205, alpha);
+        } else if (i === 11 || i === 12 || i === 23 || i === 24) {
+          r = 4.8;
+          fill(110, 132, 152, alpha);
+        } else {
+          fill(125, 145, 162, 60);
+        }
+
+        ellipse(p.x, p.y, r, r);
+      }
+    }
+
+    class Fish {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+
+        this.vx = random(-2.6, 2.6);
+        this.vy = random(-1.9, 1.9);
+
+        this.size = random(13, 24);
+        this.seed = random(1000);
+
+        this.color = random([
+          [180, 225, 248],
+          [168, 218, 246],
+          [152, 208, 242],
+          [136, 198, 238],
+          [120, 188, 234],
+          [102, 174, 228],
+          [84, 158, 220],
+          [66, 140, 208],
+          [50, 120, 192]
+        ]);
+      }
+
+      applyAmbientFlow() {
+        let t = frameCount * 0.013;
+        let angle = noise(
+          this.x * 0.0024,
+          this.y * 0.0024,
+          t + this.seed
+        ) * TWO_PI * 2.0;
+
+        this.vx += cos(angle) * 0.13;
+        this.vy += sin(angle) * 0.13;
+      }
+
+      applyBodySwirl() {
+        if (!poseLandmarks) return;
+
+        let chest = getScaledBodyCenter();
+        if (!chest) return;
+
+        let dx = this.x - chest.x;
+        let dy = this.y - chest.y;
+        let d = sqrt(dx * dx + dy * dy);
+
+        if (d < 250 && d > 1) {
+          let swirl = 0.018;
+          this.vx += (-dy / d) * swirl;
+          this.vy += (dx / d) * swirl;
+        }
+      }
+
+      applyHandDirectionalFlow() {
+        if (!poseLandmarks) return;
+        if (twoHandCircleActive) return;
+
+        const leftShoulder = getScaledPoint(11);
+        const rightShoulder = getScaledPoint(12);
+        const leftElbow = getScaledPoint(13);
+        const rightElbow = getScaledPoint(14);
+        const leftWrist = getScaledPoint(15);
+        const rightWrist = getScaledPoint(16);
+
+        if (!leftShoulder || !rightShoulder) return;
+
+        const leftRaised = leftWrist && leftWrist.y < leftShoulder.y + 26;
+        const rightRaised = rightWrist && rightWrist.y < rightShoulder.y + 26;
+
+        if (leftRaised && !rightRaised && leftElbow && leftWrist) {
+          this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 180, 0.015);
+        } else if (rightRaised && !leftRaised && rightElbow && rightWrist) {
+          this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 180, 0.015);
+        } else if (leftRaised && rightRaised) {
+          const leftSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+          const rightSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+
+          if (leftSpeed > rightSpeed * 1.25 && leftElbow && leftWrist) {
+            this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 180, 0.015);
+          } else if (rightSpeed > leftSpeed * 1.25 && rightElbow && rightWrist) {
+            this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 180, 0.015);
+          }
+        }
+      }
+
+      applyOneHandDirectionalByArm(joint, hand, radius, globalWeak) {
+        if (!joint || !hand) return;
+
+        let armX = hand.x - joint.x;
+        let armY = hand.y - joint.y;
+        let armLen = sqrt(armX * armX + armY * armY);
+        if (armLen < 1) return;
+
+        let dirX = armX / armLen;
+        let dirY = armY / armLen;
+
+        // 遠場弱引導：整片魚都會稍微知道方向
+        this.vx += dirX * globalWeak;
+        this.vy += dirY * globalWeak;
+
+        // 近場強反應：靠近手的魚反應更明顯
+        let dx = this.x - hand.x;
+        let dy = this.y - hand.y;
+        let d = sqrt(dx * dx + dy * dy);
+
+        if (d > radius || d < 1) return;
+
+        let strength = map(d, 0, radius, 0.42, 0.04);
+        this.vx += dirX * strength;
+        this.vy += dirY * strength;
+
+        this.vx += dirX * 0.08;
+        this.vy += dirY * 0.08;
+
+        let sideX = -dirY;
+        let sideY = dirX;
+        let spread = map(d, 0, radius, 0.05, 0.0);
+        this.vx += sideX * random(-spread, spread);
+        this.vy += sideY * random(-spread, spread);
+      }
+
+      applyTwoHandField() {
+        if (!poseLandmarks) return;
+        if (!twoHandCircleActive) return;
+
+        let leftWrist = getScaledPoint(15);
+        let rightWrist = getScaledPoint(16);
+        if (!leftWrist || !rightWrist) return;
+
+        let mid = midPoint(leftWrist, rightWrist);
+        let handSpan = dist(leftWrist.x, leftWrist.y, rightWrist.x, rightWrist.y);
+        let d = dist(this.x, this.y, mid.x, mid.y);
+
+        let fieldRadius = handSpan * 1.18 + 95;
+        if (d > fieldRadius || d < 1) return;
+
+        let pull = map(d, 0, fieldRadius, 0.12, 0);
+        this.vx += (mid.x - this.x) * 0.0012;
+        this.vy += (mid.y - this.y) * 0.0012;
+
+        this.vx += (-(this.y - mid.y)) * 0.00095;
+        this.vy += ((this.x - mid.x)) * 0.00095;
+
+        this.vx += random(-pull, pull) * 0.18;
+        this.vy += random(-pull, pull) * 0.18;
+      }
+
+      update() {
+        this.x += this.vx;
+        this.y += this.vy;
+
+        this.vx *= 0.985;
+        this.vy *= 0.985;
+
+        let speed = sqrt(this.vx * this.vx + this.vy * this.vy);
+        let maxSpeed = 5.2;
+
+        if (speed > maxSpeed) {
+          this.vx = (this.vx / speed) * maxSpeed;
+          this.vy = (this.vy / speed) * maxSpeed;
+        }
+      }
+
+      wrapSoft() {
+        const m = 50;
+
+        if (this.x < -m) this.x = width + m;
+        if (this.x > width + m) this.x = -m;
+        if (this.y < -m) this.y = height + m;
+        if (this.y > height + m) this.y = -m;
+      }
+
+      display() {
+        let angle = atan2(this.vy, this.vx);
+        let c = this.color;
+
+        push();
+        translate(this.x, this.y);
+        rotate(angle);
+
+        noStroke();
+
+        fill(c[0], c[1], c[2], 12);
+        ellipse(0, 0, this.size * 2.5, this.size * 1.55);
+
+        fill(c[0], c[1], c[2], 18);
+        ellipse(-1, 0, this.size * 2.0, this.size * 1.18);
+
+        fill(c[0], c[1], c[2], 26);
+        ellipse(0, 0, this.size * 1.7, this.size * 1.0);
+
+        fill(c[0], c[1], c[2], 88);
+        beginShape();
+        vertex(this.size * 0.78, 0);
+        bezierVertex(
+          this.size * 0.18, -this.size * 0.42,
+          -this.size * 0.55, -this.size * 0.35,
+          -this.size * 0.82, 0
+        );
+        bezierVertex(
+          -this.size * 0.55, this.size * 0.35,
+          this.size * 0.18, this.size * 0.42,
+          this.size * 0.78, 0
+        );
+        endShape(CLOSE);
+
+        fill(c[0], c[1], c[2], 95);
+        triangle(
+          -this.size * 0.75, 0,
+          -this.size * 1.18, -this.size * 0.32,
+          -this.size * 1.18, this.size * 0.32
+        );
+
+        fill(255, 255, 255, 30);
+        ellipse(this.size * 0.18, -this.size * 0.09, this.size * 0.34, this.size * 0.15);
+
+        fill(40, 80, 120, 78);
+        ellipse(this.size * 0.42, -this.size * 0.06, 1.7, 1.7);
+
+        pop();
+      }
+    }
+
+    function getRawPoint(index) {
+      if (!poseLandmarks || !poseLandmarks[index]) return null;
+
+      let p = poseLandmarks[index];
+      if (p.visibility !== undefined && p.visibility < 0.35) return null;
+
+      return {
+        x: (1 - p.x) * width,
+        y: p.y * height,
+        z: p.z
+      };
+    }
+
+    function getScaledBodyCenter() {
+      let ls = getRawPoint(11);
+      let rs = getRawPoint(12);
+      let lh = getRawPoint(23);
+      let rh = getRawPoint(24);
+
+      if (ls && rs && lh && rh) {
+        let rawCenter = {
+          x: (ls.x + rs.x + lh.x + rh.x) / 4,
+          y: (ls.y + rs.y + lh.y + rh.y) / 4
+        };
+        return scalePointAround(rawCenter, rawCenter, FIGURE_SCALE);
+      }
+
+      return null;
+    }
+
+    function getScaledPoint(index) {
+      let p = getRawPoint(index);
+      if (!p) return null;
+
+      let center = getRawFigureCenter();
+      if (!center) return p;
+
+      return scalePointAround(p, center, FIGURE_SCALE);
+    }
+
+    function getRawFigureCenter() {
+      let ls = getRawPoint(11);
+      let rs = getRawPoint(12);
+      let lh = getRawPoint(23);
+      let rh = getRawPoint(24);
+
+      if (ls && rs && lh && rh) {
+        return {
+          x: (ls.x + rs.x + lh.x + rh.x) / 4,
+          y: (ls.y + rs.y + lh.y + rh.y) / 4
+        };
+      }
+
+      if (ls && rs) {
+        return {
+          x: (ls.x + rs.x) / 2,
+          y: (ls.y + rs.y) / 2
+        };
+      }
+
+      return { x: width / 2, y: height / 2 };
+    }
+
+    function scalePointAround(p, center, scaleValue) {
+      return {
+        x: center.x + (p.x - center.x) * scaleValue,
+        y: center.y + (p.y - center.y) * scaleValue,
+        z: p.z
+      };
+    }
+
+    function midPoint(a, b) {
+      return {
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5
+      };
+    }
+
+    function mag(x, y) {
+      return sqrt(x * x + y * y);
+    }
+
+    function detectTwoHandCircleGestureLoose() {
+      if (!poseLandmarks) return false;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const le = getScaledPoint(13);
+      const re = getScaledPoint(14);
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+
+      if (!ls || !rs || !le || !re || !lw || !rw || !lh || !rh) return false;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+      const wristMid = midPoint(lw, rw);
+
+      const leftSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+      const rightSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+      const bothMoving = leftSpeed > 0.55 && rightSpeed > 0.55;
+
+      const span = dist(lw.x, lw.y, rw.x, rw.y);
+      const handsFarEnough = span > shoulderW * 0.50 && span < shoulderW * 2.40;
+
+      const upperZone =
+        lw.y < hipCenter.y + bodyH * 0.08 &&
+        rw.y < hipCenter.y + bodyH * 0.08 &&
+        lw.y > shoulderCenter.y - bodyH * 1.10 &&
+        rw.y > shoulderCenter.y - bodyH * 1.10;
+
+      const leftBent = dist(le.x, le.y, lw.x, lw.y) < shoulderW * 1.40;
+      const rightBent = dist(re.x, re.y, rw.x, rw.y) < shoulderW * 1.40;
+      const curvedPose = leftBent && rightBent;
+
+      const relLX = lw.x - wristMid.x;
+      const relLY = lw.y - wristMid.y;
+      const relRX = rw.x - wristMid.x;
+      const relRY = rw.y - wristMid.y;
+
+      const leftRadial = abs(relLX * leftHandVelocity.x + relLY * leftHandVelocity.y);
+      const leftTangential = abs(relLX * leftHandVelocity.y - relLY * leftHandVelocity.x);
+
+      const rightRadial = abs(relRX * rightHandVelocity.x + relRY * rightHandVelocity.y);
+      const rightTangential = abs(relRX * rightHandVelocity.y - relRY * rightHandVelocity.x);
+
+      const circularish =
+        leftTangential > leftRadial * 0.70 &&
+        rightTangential > rightRadial * 0.70;
+
+      const oppositeSweep =
+        (leftHandVelocity.x * rightHandVelocity.x < -0.05) ||
+        (leftHandVelocity.y * rightHandVelocity.y < -0.05);
+
+      return bothMoving && handsFarEnough && upperZone && curvedPose && (circularish || oppositeSweep);
+    }
+
+    function setupMediaPipe() {
+      const videoElement = document.getElementById("input_video");
+
+      const pose = new Pose({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+      });
+
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      pose.onResults((results) => {
+        if (results.poseLandmarks) {
+          poseLandmarks = results.poseLandmarks;
+          poseReady = true;
+        }
+      });
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await pose.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+      });
+
+      camera.start();
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+
+      inkDust = [];
+      for (let i = 0; i < 240; i++) {
+        inkDust.push({
+          x: random(width),
+          y: random(height),
+          r: random(8, 36),
+          a: random(8, 22)
+        });
+      }
+
+      for (let f of fishes) {
+        f.x = random(width);
+        f.y = random(height);
+      }
+    }
+  </script>
+</body>
+</html>
