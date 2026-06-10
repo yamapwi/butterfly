@@ -1,18 +1,749 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="zh-Hant">
 <head>
-    <title>Butterfly</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Prelude in the City｜城市夜景 MIDI 視覺化</title>
+<style>
+:root{--bg:#0b0f14;--fg:#eaf2ff;--border:#1a2230}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#0b0f14}
+button,input[type=range],input[type=checkbox]{background:#131a24;color:var(--fg);border:1px solid #243042;border-radius:8px;padding:6px 10px}
+button{cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+.sep{width:1px;height:24px;background:#223046}
+.pill{padding:2px 8px;border:1px solid #2a3a52;border-radius:999px;font-size:12px;color:#a9c8ff;margin-left:4px;white-space:nowrap}
+.title{font-size:14px;color:#dbeafe;font-weight:600;margin-right:4px}
+#stage{display:flex;flex-direction:column;flex:1;min-height:0}
+#canvas-wrap{position:relative;flex:1;min-height:0}
+#log{position:absolute;bottom:10px;right:10px;font-size:12px;color:#9bb3d4;pointer-events:none;max-width:68vw;text-align:right;background:rgba(8,12,18,.35);padding:4px 8px;border-radius:8px}
+footer{height:34px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12px;color:#9bb3d4;background:#0b0f14}
+#scrubWrap{display:flex;align-items:center;gap:10px;min-width:260px;flex:1}
+#scrub{width:100%;height:6px;border-radius:999px;background:#1a2435;outline:none;border:1px solid #243042;-webkit-appearance:none;appearance:none}
+#scrub:disabled{opacity:.5}
+#scrub::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#f6c177;border:1px solid #774;cursor:pointer;margin-top:-4px}
+#scrub::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#f6c177;border:1px solid #774;cursor:pointer}
+#vkbBottom{display:block;border-top:1px solid #1b2740;background:rgba(8,12,18,.95)}
+.vkbd-wrap{position:relative;height:180px;background:#0f1622}
+#vkbd{position:relative;user-select:none;touch-action:none;width:100%;height:180px;border-top:1px solid #1b2740}
+.white-keys{position:absolute;inset:0;display:flex;align-items:stretch}
+.black-keys{position:absolute;inset:0;pointer-events:none}
+.key{position:relative;box-sizing:border-box;cursor:pointer;transition:background-color .05s ease, transform .04s ease}
+.key.white{flex:1 0 auto;height:100%;background:#e7eefc;border-right:1px solid #223046}
+.key.white:last-child{border-right:none}
+.key.white.on{background:#cfe0ff}
+.key.white.playing{background:#bcd1fb;transform:translateY(1px)}
+.key.black{position:absolute;width:calc(100%/28*0.62);height:62%;top:0;background:#1c2331;border:1px solid #2a3a52;border-radius:0 0 6px 6px;z-index:5;pointer-events:auto}
+.key.black.on{background:#2b3954}
+.key.black.playing{background:#3b4f78;transform:translateY(1px)}
+</style>
 </head>
 <body>
-    <h1>Hi</h1>
-    <ul>
-        <li><a href="./project-A/">Butterflies were flying when it snowed</a></li>
-        <li><a href="./project-B/">snow White</a></li>
-        <li><a href="./project-C">For Yesung</a></li>
-        <li><a href="https://editor.p5js.org/yamapwi/full/BjWmbT8b9">Where Winds Meet</a></li>
-        <li><a href="./project-D/">It's a sad rainy day in my world</a></li>
-        <li><a href="./project-E/">Tai Chi</a></li>
-        <li><a href="./project-F/">Prelude in the City</a></li>
-        </ul>
+<header>
+  <span class="title">Prelude in the City</span>
+  <button id="midiConnect">🎹 連接 VMPK / loopMIDI</button>
+  <span id="midiStatus" class="pill">MIDI：尚未連接</span>
+  <span class="sep"></span>
+  <button id="play">▶️ 播放</button>
+  <button id="pause" disabled>⏸ 暫停</button>
+  <button id="stop" disabled>⏹ 停止</button>
+  <span class="sep"></span>
+  <div id="scrubWrap" title="拖曳或點擊以跳到指定時間">
+    <input id="scrub" type="range" min="0" value="0" step="0.001" disabled />
+    <span id="scrubVal" class="pill">0:00</span>
+  </div>
+  <span class="sep"></span>
+  <label style="display:flex;align-items:center;gap:8px">
+    <input id="toggleVKB" type="checkbox" checked />
+    顯示下方虛擬鋼琴
+  </label>
+</header>
+
+<div id="stage">
+  <div id="canvas-wrap"><div id="log">狀態：請按播放，系統會載入 Bach Prelude in C MIDI。</div></div>
+  <div id="vkbBottom" aria-hidden="false"><div class="vkbd-wrap"><div id="vkbd"></div></div></div>
+</div>
+<footer>🎵 Bach Prelude in C Major · VMPK / loopMIDI · WebMidi · Tone.js · p5.js</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webmidi@3.1.11/dist/iife/webmidi.iife.min.js"></script>
+<script>
+/* =========================================================
+   設定：請把 Bach Prelude in C 的 MIDI 檔放在同資料夾，並命名為 bach-prelude-c.mid
+   建議用 VS Code Live Server 或本機伺服器開啟，不要直接用 file:// 開啟。
+========================================================= */
+const MIDI_URL = 'bach-prelude-c.mid';
+
+const $ = s => document.querySelector(s);
+const playBtn = $('#play'), pauseBtn = $('#pause'), stopBtn = $('#stop'), log = $('#log');
+const midiConnectBtn = $('#midiConnect'), midiStatus = $('#midiStatus');
+const scrub = $('#scrub'), scrubVal = $('#scrubVal');
+const toggleVKB = $('#toggleVKB'), vkbBottom = $('#vkbBottom'), vkbdEl = $('#vkbd');
+
+let midi = null;
+let part = null;
+let loaded = false;
+let started = false;
+let liveSynth = null;
+let midiInput = null;
+let midiReady = false;
+const externalMidiPressed = new Set();
+let liveClockStart = null;
+let isScrubbing = false;
+let usePreview = true;
+let previewSec = 0;
+
+const piano = new Tone.Sampler({
+  urls: {
+    A0:'A0.mp3', C1:'C1.mp3', 'F#1':'Fs1.mp3', C2:'C2.mp3', 'F#2':'Fs2.mp3',
+    C3:'C3.mp3', 'F#3':'Fs3.mp3', C4:'C4.mp3', 'F#4':'Fs4.mp3',
+    C5:'C5.mp3', 'F#5':'Fs5.mp3', C6:'C6.mp3', 'F#6':'Fs6.mp3', C7:'C7.mp3'
+  },
+  release: 1.2,
+  baseUrl: 'https://tonejs.github.io/audio/salamander/'
+}).toDestination();
+
+const V = {
+  notesAll: [],
+  activeNotes: [],
+  totalSeconds: 0,
+  midiMin: 48,
+  midiMax: 84,
+  city: null,
+  bgSnow: [],
+  noteSnow: [],
+  windowFlashes: [],
+  riverFlashes: [],
+  lampPulse: 0,
+  liveOverlay: []
+};
+
+window.addEventListener('error', e => {
+  log.textContent = '⚠️ JS Error: ' + (e.message || e.error);
+});
+
+function midiToName(m){
+  const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  return names[m%12] + (Math.floor(m/12)-1);
+}
+function fmtTime(sec){
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec/60), s = sec%60;
+  return `${m}:${s.toString().padStart(2,'0')}`;
+}
+function timelineSeconds(){
+  if (Tone.Transport.state === 'started') {
+    if (liveClockStart === null) liveClockStart = Tone.now() - Tone.Transport.seconds;
+    return Tone.now() - liveClockStart;
+  }
+  if (usePreview) return previewSec;
+  if (liveClockStart === null) liveClockStart = Tone.now();
+  return Tone.now() - liveClockStart;
+}
+async function ensureAudio(){
+  if (started) return true;
+  try{
+    await Tone.start();
+    if (Tone.getContext().rawContext.state !== 'running') await Tone.getContext().rawContext.resume();
+    started = true;
+    liveSynth = piano;
+    return true;
+  }catch(err){
+    log.textContent = '❌ 無法啟用音訊：' + err;
+    return false;
+  }
+}
+
+async function setupExternalMidi(){
+  if (midiReady) return true;
+  if (!window.WebMidi){
+    midiStatus.textContent = 'MIDI：WebMidi 載入失敗';
+    log.textContent = '❌ WebMidi.js 載入失敗，請確認網路或 CDN。';
+    return false;
+  }
+  try{
+    await WebMidi.enable();
+
+    if (WebMidi.inputs.length === 0){
+      midiStatus.textContent = 'MIDI：未偵測到輸入';
+      log.textContent = '⚠️ 未偵測到 MIDI 輸入。請先開啟 loopMIDI 與 VMPK，並在 VMPK 設定 MIDI Output。';
+      return false;
+    }
+
+    // 優先抓 loopMIDI / VMPK，抓不到就使用第一個 MIDI input
+    midiInput = WebMidi.inputs.find(input => {
+      const name = input.name.toLowerCase();
+      return name.includes('loop') || name.includes('vmpk') || name.includes('midi');
+    }) || WebMidi.inputs[0];
+
+    midiInput.addListener('noteon', e => {
+      const midiNum = e.note.number;
+      const noteName = e.note.name + e.note.octave;
+      const vel = Math.max(0.05, e.velocity || 0.8);
+
+      externalMidiPressed.add(midiNum);
+
+      // 視覺路線：用同一套城市夜景視覺化
+      pushVisual(midiNum, vel, 0.25);
+      setKeyOn(midiNum);
+
+      // 聽覺路線：若使用者已經點過頁面或按鈕，瀏覽器會發聲
+      if (started && liveSynth){
+        liveSynth.triggerAttack(noteName, undefined, vel);
+      }
+    });
+
+    midiInput.addListener('noteoff', e => {
+      const midiNum = e.note.number;
+      const noteName = e.note.name + e.note.octave;
+
+      externalMidiPressed.delete(midiNum);
+      if (started && liveSynth){
+        liveSynth.triggerRelease(noteName);
+      }
+      setKeyOff(midiNum);
+    });
+
+    // 有些 MIDI 裝置會用 noteon velocity 0 代表 noteoff
+    midiInput.addListener('noteon', e => {
+      if ((e.velocity || 0) !== 0) return;
+      const midiNum = e.note.number;
+      externalMidiPressed.delete(midiNum);
+      if (started && liveSynth){
+        liveSynth.triggerRelease(e.note.name + e.note.octave);
+      }
+      setKeyOff(midiNum);
+    });
+
+    midiReady = true;
+    midiStatus.textContent = 'MIDI：已連接 ' + midiInput.name;
+    log.textContent = '✅ 已連接 MIDI：' + midiInput.name + '。現在可以用 VMPK 即時彈奏城市夜景。';
+    return true;
+  }catch(err){
+    midiStatus.textContent = 'MIDI：連接失敗';
+    log.textContent = '❌ MIDI 連接失敗：' + err.message;
+    return false;
+  }
+}
+
+midiConnectBtn.onclick = async()=>{
+  await ensureAudio();
+  await setupExternalMidi();
+};
+
+// 點一下頁面可先解鎖音訊；MIDI 連接仍建議按上方按鈕，方便瀏覽器跳權限提示。
+document.addEventListener('pointerdown', ()=>{ if(!started) ensureAudio(); }, {once:true});
+
+async function loadMidi(){
+  if (loaded) return true;
+  log.textContent = '讀取 Bach Prelude in C MIDI 中...';
+  try{
+    const res = await fetch(MIDI_URL);
+    if(!res.ok) throw new Error('找不到 MIDI 檔，請確認檔名是 bach-prelude-c.mid，且和 HTML 放在同資料夾。');
+    midi = new Midi(await res.arrayBuffer());
+
+    if(part) part.dispose();
+    V.notesAll = [];
+    let gmin = 999, gmax = 0;
+    const events = [];
+
+    midi.tracks.forEach(track => {
+      track.notes.forEach(n => {
+        const ev = {
+          time: n.time,
+          dur: n.duration,
+          end: n.time + n.duration,
+          midi: n.midi,
+          vel: n.velocity,
+          name: n.name
+        };
+        events.push(ev);
+        V.notesAll.push(ev);
+        gmin = Math.min(gmin, ev.midi);
+        gmax = Math.max(gmax, ev.midi);
+      });
+    });
+
+    events.sort((a,b)=>a.time-b.time);
+    V.notesAll.sort((a,b)=>a.time-b.time);
+    if(gmin < 999){
+      V.midiMin = Math.max(21, gmin - 2);
+      V.midiMax = Math.min(108, gmax + 2);
+    }
+    V.totalSeconds = V.notesAll.length ? Math.max(...V.notesAll.map(n=>n.end)) : 0;
+
+    part = new Tone.Part((time, ev) => {
+      piano.triggerAttackRelease(midiToName(ev.midi), ev.dur, time, ev.vel);
+      pushVisual(ev.midi, ev.vel, ev.dur);
+      flashKey(ev.midi, ev.dur);
+    }, events).start(0);
+    part.loop = false;
+
+    scrub.max = (V.totalSeconds || 0).toFixed(3);
+    scrub.value = '0';
+    scrub.disabled = !(V.totalSeconds > 0);
+    scrubVal.textContent = fmtTime(0);
+    loaded = true;
+    log.textContent = '✅ MIDI 已載入。按播放開始城市夜景視覺化。';
+    return true;
+  }catch(err){
+    log.textContent = '❌ MIDI 讀取失敗：' + err.message;
+    return false;
+  }
+}
+
+playBtn.onclick = async()=>{
+  if(!(await ensureAudio())) return;
+  if(!(await loadMidi())) return;
+  const startAt = scrub.disabled ? 0 : parseFloat(scrub.value)||0;
+  Tone.Transport.stop();
+  Tone.Transport.seconds = startAt;
+  liveClockStart = Tone.now() - startAt;
+  Tone.Transport.start('+0.03');
+  usePreview = false;
+  playBtn.disabled = true;
+  pauseBtn.disabled = false;
+  stopBtn.disabled = false;
+  log.textContent = '▶️ 播放中：窗戶會依照音高對應建築亮起。';
+};
+pauseBtn.onclick = ()=>{
+  const t = timelineSeconds();
+  Tone.Transport.pause();
+  usePreview = true;
+  previewSec = t;
+  scrub.value = Math.min(t, V.totalSeconds||t).toFixed(3);
+  scrubVal.textContent = fmtTime(t);
+  playBtn.disabled = false;
+  pauseBtn.disabled = true;
+  log.textContent = '⏸ 已暫停';
+};
+stopBtn.onclick = ()=>{
+  Tone.Transport.stop();
+  Tone.Transport.seconds = 0;
+  usePreview = true;
+  previewSec = 0;
+  liveClockStart = null;
+  scrub.value = '0';
+  scrubVal.textContent = fmtTime(0);
+  playBtn.disabled = false;
+  pauseBtn.disabled = true;
+  log.textContent = '⏹ 已停止';
+};
+
+setInterval(()=>{
+  if (Tone.Transport.state === 'started' && !isScrubbing && !scrub.disabled){
+    const tVis = timelineSeconds();
+    const total = V.totalSeconds || 0;
+    if (total > 0 && tVis >= total){
+      Tone.Transport.stop();
+      usePreview = true;
+      previewSec = 0;
+      scrub.value = '0';
+      scrubVal.textContent = fmtTime(0);
+      liveClockStart = null;
+      playBtn.disabled = false;
+      pauseBtn.disabled = true;
+      log.textContent = '⏹ 播放結束';
+      return;
+    }
+    const t = Math.max(0, Math.min(tVis, total || tVis));
+    scrub.value = t.toFixed(3);
+    scrubVal.textContent = fmtTime(t);
+  }
+}, 50);
+
+scrub.addEventListener('input', ()=>{
+  isScrubbing = true;
+  const t = parseFloat(scrub.value)||0;
+  scrubVal.textContent = fmtTime(t);
+  if (Tone.Transport.state !== 'started'){
+    usePreview = true;
+    previewSec = t;
+  }
+});
+['change','pointerup','mouseup','touchend'].forEach(evt=>{
+  scrub.addEventListener(evt, ()=>{
+    const t = parseFloat(scrub.value)||0;
+    if (Tone.Transport.state === 'started'){
+      Tone.Transport.seconds = t;
+      liveClockStart = Tone.now() - t;
+    }else{
+      usePreview = true;
+      previewSec = t;
+    }
+    isScrubbing = false;
+    scrubVal.textContent = fmtTime(t);
+  });
+});
+
+toggleVKB.onchange = ()=>{
+  vkbBottom.style.display = toggleVKB.checked ? 'block' : 'none';
+  vkbBottom.setAttribute('aria-hidden', (!toggleVKB.checked).toString());
+};
+
+function noteToBuildingIndex(midiNum){
+  const count = V.city?.buildings?.length || 8;
+  const min = V.midiMin || 48;
+  const max = V.midiMax || 84;
+  const t = Math.max(0, Math.min(1, (midiNum - min) / Math.max(1, max - min)));
+  return Math.min(count - 1, Math.floor(t * count));
+}
+function pushVisual(midiNum, vel=0.8, dur=0.2){
+  const ev = {time:Tone.now(), midi:midiNum, vel, dur};
+  V.activeNotes.push(ev);
+
+  const buildingIndex = noteToBuildingIndex(midiNum);
+  V.lampPulse = Math.min(1, V.lampPulse + 0.18 + vel*0.35);
+
+  const slots = (V.city?.windows || []).filter(s => s.buildingIndex === buildingIndex);
+  const flashCount = 2 + Math.floor(vel * 5);
+  for(let i=0;i<flashCount && slots.length;i++){
+    const slot = slots[Math.floor(Math.random()*slots.length)];
+    V.windowFlashes.push({slot, life:1, vel, midi:midiNum});
+    V.riverFlashes.push({x:slot.x+slot.w/2, y:slot.refY, w:slot.w, life:1, vel});
+  }
+
+  const snowCount = midiNum >= 72 ? 4 : midiNum <= 55 ? 2 : 3;
+  for(let i=0;i<snowCount;i++){
+    const baseX = mapValue(midiNum, V.midiMin, V.midiMax, window.innerWidth*0.10, window.innerWidth*0.90);
+    V.noteSnow.push({
+      x: baseX + rand(-22,22),
+      y: rand(20, window.innerHeight*0.42),
+      vy: rand(0.6,1.4) + vel,
+      r: mapValue(vel,0,1,2.6,6.2) * rand(0.85,1.2),
+      life: 1,
+      phase: rand(0,Math.PI*2),
+      sway: rand(0.35,0.9)
+    });
+  }
+}
+function mapValue(v, inMin, inMax, outMin, outMax){
+  const t = Math.max(0, Math.min(1, (v-inMin)/Math.max(1e-9,inMax-inMin)));
+  return outMin + t*(outMax-outMin);
+}
+function rand(a,b){ return a + Math.random()*(b-a); }
+
+/* ---------- p5 城市夜景 ---------- */
+new p5(p=>{
+  let W,H;
+  const stage = $('#stage');
+
+  function sizeFromContainer(){
+    W = stage.clientWidth;
+    const vkbH = (vkbBottom.style.display==='block') ? vkbBottom.offsetHeight : 0;
+    H = Math.max(120, stage.clientHeight - vkbH);
+  }
+  p.setup = ()=>{
+    sizeFromContainer();
+    const c = p.createCanvas(W,H);
+    c.parent('canvas-wrap');
+    createCityLayout(p,W,H);
+  };
+  p.windowResized = ()=>{
+    sizeFromContainer();
+    p.resizeCanvas(W,H);
+    createCityLayout(p,W,H);
+  };
+  new ResizeObserver(()=>{
+    sizeFromContainer();
+    p.resizeCanvas(W,H);
+    createCityLayout(p,W,H);
+  }).observe(vkbBottom);
+
+  p.draw = ()=> drawCity(p,W,H);
+
+  function createCityLayout(p,w,h){
+    const horizonY = h * 0.42;
+    const riverH = h * 0.22;
+    const riverTop = horizonY;
+    const groundTop = riverTop - h*0.03;
+    const buildingCount = 8;
+    const usableWidth = w * 0.9;
+    const startX = w * 0.05;
+    const gap = usableWidth / buildingCount;
+    const buildings = [];
+    const windows = [];
+    let seed = 20251126;
+    function sr(){
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    }
+    let bx = startX;
+    for(let i=0;i<buildingCount;i++){
+      let bw = gap * (0.85 + sr()*0.25);
+      const bh = h*0.18 + sr()*h*0.12;
+      if (bx + bw > w*0.95) bw = w*0.95 - bx;
+      const topY = groundTop - bh;
+      const roofTri = sr() < 0.55;
+      const b = {x:bx,y:topY,w:bw,h:bh,roofTri,index:i};
+      buildings.push(b);
+
+      const cols = Math.max(1, Math.floor(bw/22));
+      const rows = Math.max(1, Math.floor(bh/24));
+      for(let cy=0; cy<rows; cy++){
+        for(let cx=0; cx<cols; cx++){
+          if(sr() < 0.42){
+            const cellW = (bw-18)/cols;
+            const cellH = (bh-16)/rows;
+            const ww = Math.min(10, cellW*0.9);
+            const wh = Math.min(13, cellH*0.9);
+            const wx = bx + 6 + cx*cellW + (cellW-ww)*0.5;
+            const wy = topY + 8 + cy*cellH + (cellH-wh)*0.5;
+            windows.push({x:wx,y:wy,w:ww,h:wh,buildingIndex:i,refY:riverTop+4});
+          }
+        }
+      }
+      bx += gap;
+    }
+    V.city = {horizonY, riverH, riverTop, riverBottom:riverTop+riverH, groundTop, pathTop:riverTop+riverH, pathBottom:h, buildings, windows};
+    V.bgSnow = [];
+    for(let i=0;i<150;i++){
+      V.bgSnow.push({x:Math.random()*w,y:Math.random()*h*0.85,r:p.random(1.6,3.4),vy:p.random(0.32,0.88),drift:p.random(-0.25,0.25),phase:p.random(p.TWO_PI)});
+    }
+  }
+
+  function drawCity(p,w,h){
+    if(!V.city) createCityLayout(p,w,h);
+    const C = V.city;
+    const lampX = w * 0.78;
+    const lampBaseY = C.pathBottom - 6;
+    const lampTopY = C.pathTop + (C.pathBottom - C.pathTop) * 0.25;
+    const lampHeadY = lampTopY - 8;
+
+    // sky gradient
+    p.noStroke();
+    for(let y=0;y<h;y+=4){
+      const t = y/h;
+      p.fill(10+8*t,14+16*t,24+26*t);
+      p.rect(0,y,w,4);
+    }
+
+    // buildings
+    p.noStroke();
+    for(const b of C.buildings){
+      p.fill(18,22,34,255);
+      p.rect(b.x,b.y,b.w,b.h+4);
+      if(b.roofTri){
+        p.triangle(b.x,b.y,b.x+b.w/2,b.y-b.h*0.25,b.x+b.w,b.y);
+      }
+    }
+
+    // base window glow
+    for(const slot of C.windows){
+      p.noStroke();
+      p.fill(230,210,170,58);
+      p.rect(slot.x,slot.y,slot.w,slot.h,2);
+    }
+
+    // active window flashes by pitch-building mapping
+    for(let i=V.windowFlashes.length-1;i>=0;i--){
+      const f = V.windowFlashes[i];
+      f.life -= 0.036;
+      if(f.life<=0){ V.windowFlashes.splice(i,1); continue; }
+      const a = 245 * f.life;
+      p.noStroke();
+      p.fill(255,230,175,a);
+      p.rect(f.slot.x,f.slot.y,f.slot.w,f.slot.h,3);
+      p.fill(255,220,150,a*0.15);
+      p.circle(f.slot.x+f.slot.w/2,f.slot.y+f.slot.h/2,18*f.life);
+    }
+
+    // shore
+    p.noStroke();
+    p.fill(19,23,35,255);
+    p.rect(0,C.groundTop,w,C.riverTop-C.groundTop);
+
+    // river
+    p.noStroke();
+    p.fill(12,22,40,240);
+    p.rect(0,C.riverTop,w,C.riverH+1);
+
+    // constant reflections
+    for(const slot of C.windows){
+      const cx = slot.x + slot.w/2;
+      const topRef = C.riverTop + 4;
+      const bottomRef = C.riverTop + C.riverH*0.85;
+      const refWidth = slot.w*0.58;
+      for(let yy=topRef; yy<bottomRef; yy+=4){
+        const t = (yy-topRef)/(bottomRef-topRef);
+        const a = 44*(1-t);
+        p.noStroke();
+        p.fill(240,220,180,a);
+        p.rect(cx-refWidth/2,yy,refWidth,3);
+      }
+    }
+
+    // note-triggered river flashes
+    for(let i=V.riverFlashes.length-1;i>=0;i--){
+      const r = V.riverFlashes[i];
+      r.life -= 0.04;
+      if(r.life<=0){ V.riverFlashes.splice(i,1); continue; }
+      const top = C.riverTop + 3;
+      const bottom = C.riverTop + C.riverH*0.92;
+      for(let yy=top; yy<bottom; yy+=5){
+        const t = (yy-top)/(bottom-top);
+        const a = 155*r.life*(1-t)*(0.5+r.vel*0.5);
+        p.noStroke();
+        p.fill(255,225,165,a);
+        p.rect(r.x-r.w*0.8,yy,r.w*1.6,3);
+      }
+    }
+
+    // path
+    p.noStroke();
+    p.fill(20,26,38,255);
+    p.rect(0,C.pathTop,w,C.pathBottom-C.pathTop);
+    p.stroke(40,52,70,180); p.strokeWeight(2);
+    p.line(0,C.pathTop+10,w,C.pathTop+10);
+    for(let x=0;x<w;x+=26){ p.line(x,C.pathTop+10,x,C.pathTop+26); }
+
+    // lamp breath by notes
+    V.lampPulse *= 0.92;
+    p.stroke(30,36,50,255); p.strokeWeight(3);
+    p.line(lampX,lampBaseY,lampX,lampTopY);
+    p.noStroke();
+    p.fill(26,30,42,255);
+    p.rect(lampX-10,lampTopY-6,20,6,3);
+    const flicker = 1 + 0.06*p.sin(p.frameCount*0.01) + V.lampPulse*0.40;
+    const glowR = (36 + h*0.024) * flicker;
+    for(let k=3;k>=1;k--){
+      p.fill(255,235,200,46*k);
+      p.circle(lampX,lampHeadY,glowR*(k/3)*2);
+    }
+    p.fill(255,245,210,235);
+    p.circle(lampX,lampHeadY,8);
+
+    // background snow
+    p.noStroke();
+    for(const fl of V.bgSnow){
+      fl.y += fl.vy; fl.x += fl.drift + Math.sin(fl.phase)*0.16; fl.phase += 0.01;
+      if(fl.y > C.pathTop+20){ fl.y=-12; fl.x=Math.random()*w; }
+      if(fl.x < -10) fl.x=w+10; if(fl.x>w+10) fl.x=-10;
+      const dx=fl.x-lampX, dy=fl.y-lampHeadY, dist=Math.sqrt(dx*dx+dy*dy);
+      let alpha=118;
+      if(dist<glowR) alpha += 75*(1-dist/glowR);
+      p.fill(230,240,255,alpha);
+      p.circle(fl.x,fl.y,fl.r*2);
+    }
+
+    // note snow
+    for(let i=V.noteSnow.length-1;i>=0;i--){
+      const s=V.noteSnow[i];
+      s.y += s.vy; s.phase += 0.04; s.x += Math.sin(s.phase)*s.sway; s.life -= 0.018;
+      if(s.life<=0 || s.y>C.pathBottom+20){ V.noteSnow.splice(i,1); continue; }
+      const a=230*s.life;
+      p.noStroke();
+      p.fill(200,220,255,a*0.45); p.circle(s.x,s.y,s.r*2.4);
+      p.fill(240,248,255,a); p.circle(s.x,s.y,s.r*1.4);
+    }
+  }
+});
+
+/* ---------- 虛擬鋼琴 C3-B6 ---------- */
+const WHITE_PCS=[0,2,4,5,7,9,11];
+const BLACK_PCS=new Set([1,3,6,8,10]);
+const pressed = new Map();
+function buildKeyboard(){
+  vkbdEl.innerHTML='';
+  const midiStart = 48; // C3
+  const midiEnd = 95;   // B6
+  if(!midi){ V.midiMin = midiStart; V.midiMax = midiEnd; }
+
+  const whiteWrap=document.createElement('div'); whiteWrap.className='white-keys';
+  const blackWrap=document.createElement('div'); blackWrap.className='black-keys';
+  vkbdEl.appendChild(whiteWrap); vkbdEl.appendChild(blackWrap);
+
+  const whiteList=[];
+  for(let m=midiStart; m<=midiEnd; m++){
+    if(!WHITE_PCS.includes(m%12)) continue;
+    const el=document.createElement('div');
+    el.className='key white'; el.dataset.midi=m;
+    addKeyEvents(el);
+    whiteWrap.appendChild(el);
+    whiteList.push({midi:m, el});
+  }
+  const whiteWidth=100/whiteList.length;
+  for(let i=0;i<whiteList.length;i++){
+    const m=whiteList[i].midi;
+    const pc=m%12;
+    if([0,2,5,7,9].includes(pc)){
+      const blackMidi=m+1;
+      if(blackMidi>midiEnd || !BLACK_PCS.has(blackMidi%12)) continue;
+      const el=document.createElement('div');
+      el.className='key black'; el.dataset.midi=blackMidi;
+      const leftPct=(i+1)*whiteWidth-whiteWidth*0.35;
+      el.style.left=`calc(${leftPct}% - 8px)`;
+      addKeyEvents(el);
+      blackWrap.appendChild(el);
+    }
+  }
+}
+function addKeyEvents(el){
+  el.addEventListener('pointerdown',onKeyDown,{passive:false});
+  el.addEventListener('pointerenter',e=>{ if(e.buttons===1) onKeyDown(e); });
+  el.addEventListener('pointerup',onKeyUp);
+  el.addEventListener('pointercancel',onKeyUp);
+  el.addEventListener('pointerleave',onKeyUp);
+}
+async function onKeyDown(e){
+  e.preventDefault();
+  const ok=await ensureAudio(); if(!ok) return;
+  const el=e.target.closest('.key'); if(!el) return;
+  const midiNum=parseInt(el.dataset.midi,10);
+  const ptr=e.pointerId || 'mouse';
+  if(!pressed.has(ptr)) pressed.set(ptr,new Set());
+  const set=pressed.get(ptr);
+  if(set.has(midiNum)) return;
+  set.add(midiNum);
+  el.classList.add('playing','on');
+  liveSynth.triggerAttack(midiToName(midiNum), undefined, 0.95);
+  pushVisual(midiNum,0.95,0.25);
+  el.setPointerCapture && el.setPointerCapture(e.pointerId);
+}
+function onKeyUp(e){
+  const el=e.target.closest('.key'); if(!el) return;
+  const midiNum=parseInt(el.dataset.midi,10);
+  const ptr=e.pointerId || 'mouse';
+  const set=pressed.get(ptr); if(!set) return;
+  if(set.has(midiNum)){
+    set.delete(midiNum);
+    el.classList.remove('playing');
+    liveSynth && liveSynth.triggerRelease(midiToName(midiNum));
+    let stillOn=false;
+    pressed.forEach(s=>{ if(s.has(midiNum)) stillOn=true; });
+    if(externalMidiPressed.has(midiNum)) stillOn=true;
+    if(!stillOn) el.classList.remove('on');
+  }
+}
+
+function setKeyOn(midiNum){
+  const key=vkbdEl.querySelector(`.key[data-midi="${midiNum}"]`);
+  if(!key) return;
+  key.classList.add('on','playing');
+}
+function setKeyOff(midiNum){
+  const key=vkbdEl.querySelector(`.key[data-midi="${midiNum}"]`);
+  if(!key) return;
+  let stillOn=false;
+  pressed.forEach(s=>{ if(s.has(midiNum)) stillOn=true; });
+  if(externalMidiPressed.has(midiNum)) stillOn=true;
+  if(!stillOn) key.classList.remove('on','playing');
+}
+function flashKey(midiNum,dur=0.15){
+  const key=vkbdEl.querySelector(`.key[data-midi="${midiNum}"]`);
+  if(!key) return;
+  key.classList.add('on','playing');
+  setTimeout(()=>key.classList.remove('playing'), Math.max(80,dur*1000*0.6));
+  setTimeout(()=>{
+    let stillOn=false;
+    pressed.forEach(s=>{ if(s.has(midiNum)) stillOn=true; });
+    if(!stillOn) key.classList.remove('on');
+  }, Math.max(120,dur*1000));
+}
+buildKeyboard();
+</script>
 </body>
 </html>
