@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>Bach Prelude Sky Lantern</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<style>
+body{
+  margin:0;
+  overflow:hidden;
+  background:black;
+  font-family:"Noto Sans TC", sans-serif;
+}
+
+#ui{
+  position:absolute;
+  top:20px;
+  left:20px;
+  z-index:999;
+  color:white;
+  background:rgba(0,0,0,0.45);
+  padding:14px 18px;
+  border-radius:14px;
+  backdrop-filter:blur(8px);
+}
+
+button{
+  padding:10px 14px;
+  font-size:15px;
+  border:none;
+  border-radius:8px;
+  cursor:pointer;
+  margin-right:6px;
+}
+
+#status{
+  margin-top:10px;
+  font-size:14px;
+  opacity:0.85;
+}
+
+video{
+  display:none;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+  <button id="startBtn">開始播放</button>
+  <button id="pauseBtn">暫停</button>
+  <button id="restartBtn">重來</button>
+  <div id="status">MIDI 載入中...</div>
+</div>
+
+<video id="video"></video>
+
+<script>
+let midiData;
+let synth;
+
+let lanterns = [];
+let particles = [];
+let stars = [];
+
+let handsPoints = [];
+
+let isPlaying = false;
+let isPaused = false;
+
+const RELEASE_HEIGHT_RATIO = 0.55;
+const MAX_LANTERNS = 45;
+const LANTERN_PROBABILITY = 0.35;
+
+let lastGroupReleaseFrame = -999;
+const GROUP_RELEASE_COOLDOWN = 90;
+
+async function loadMidi(){
+  try{
+    const response = await fetch("bach-prelude-c.mid");
+    const arrayBuffer = await response.arrayBuffer();
+    midiData = new Midi(arrayBuffer);
+
+    document.getElementById("status").innerHTML =
+      "MIDI 載入成功，請按開始播放";
+  }
+  catch(err){
+    console.error(err);
+    document.getElementById("status").innerHTML =
+      "MIDI 載入失敗，請確認 bach-prelude-c.mid 是否放在同資料夾";
+  }
+}
+
+function setup(){
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+
+  synth = new Tone.PolySynth(Tone.Synth).toDestination();
+
+  createStars();
+  loadMidi();
+  setupMediaPipe();
+}
+
+function draw(){
+  drawSky();
+  drawStars();
+  drawMountains();
+  drawReleaseLine();
+  drawHandGuide();
+
+  if(
+    isBothHandsRaised() &&
+    frameCount - lastGroupReleaseFrame > GROUP_RELEASE_COOLDOWN
+  ){
+    releaseOldLanterns(8);
+    lastGroupReleaseFrame = frameCount;
+  }
+
+  updateParticles();
+  updateLanterns();
+
+  drawInstruction();
+}
+
+function drawSky(){
+  background(230, 65, 8);
+
+  noStroke();
+  for(let y = 0; y < height; y += 5){
+    let b = map(y, 0, height, 13, 3);
+    fill(230, 70, b, 45);
+    rect(0, y, width, 5);
+  }
+}
+
+function createStars(){
+  for(let i = 0; i < 180; i++){
+    stars.push({
+      x: random(width),
+      y: random(height * 0.72),
+      size: random(1, 3),
+      alpha: random(25, 85)
+    });
+  }
+}
+
+function drawStars(){
+  noStroke();
+  for(let s of stars){
+    fill(50, 20, 100, s.alpha);
+    circle(s.x, s.y, s.size);
+  }
+}
+
+function drawMountains(){
+  noStroke();
+
+  fill(215, 70, 10, 80);
+  beginShape();
+  vertex(0, height);
+  for(let x = 0; x <= width; x += 80){
+    let y = height * 0.68 + noise(x * 0.004) * 120;
+    vertex(x, y);
+  }
+  vertex(width, height);
+  endShape(CLOSE);
+
+  fill(220, 80, 5, 95);
+  beginShape();
+  vertex(0, height);
+  for(let x = 0; x <= width; x += 70){
+    let y = height * 0.82 + noise(x * 0.006 + 200) * 90;
+    vertex(x, y);
+  }
+  vertex(width, height);
+  endShape(CLOSE);
+}
+
+function drawReleaseLine(){
+  let releaseY = height * RELEASE_HEIGHT_RATIO;
+
+  stroke(45, 70, 100, 18);
+  strokeWeight(1);
+  line(0, releaseY, width, releaseY);
+
+  noStroke();
+  fill(45, 50, 100, 35);
+  textAlign(RIGHT);
+  textSize(12);
+  text("釋放高度", width - 24, releaseY - 8);
+}
+
+function drawInstruction(){
+  noStroke();
+  fill(0, 0, 100, 72);
+  textAlign(CENTER);
+  textSize(14);
+  text("雙手都可以托起天燈；雙手高舉時，會釋放一批天燈升空", width / 2, height - 30);
+}
+
+document.getElementById("startBtn").addEventListener("click", async () => {
+  if(!midiData){
+    alert("MIDI 尚未載入完成");
+    return;
+  }
+
+  await Tone.start();
+
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
+
+  lanterns = [];
+  particles = [];
+  lastGroupReleaseFrame = -999;
+
+  scheduleMidi(midiData);
+  Tone.Transport.start();
+
+  isPlaying = true;
+  isPaused = false;
+
+  document.getElementById("pauseBtn").innerText = "暫停";
+  document.getElementById("status").innerHTML = "播放中，請用雙手托起天燈";
+});
+
+document.getElementById("pauseBtn").addEventListener("click", async () => {
+  if(!isPlaying) return;
+
+  if(!isPaused){
+    Tone.Transport.pause();
+    isPaused = true;
+    document.getElementById("pauseBtn").innerText = "繼續";
+    document.getElementById("status").innerHTML = "已暫停";
+  }
+  else{
+    await Tone.start();
+    Tone.Transport.start();
+    isPaused = false;
+    document.getElementById("pauseBtn").innerText = "暫停";
+    document.getElementById("status").innerHTML = "播放中";
+  }
+});
+
+document.getElementById("restartBtn").addEventListener("click", async () => {
+  if(!midiData){
+    alert("MIDI 尚未載入完成");
+    return;
+  }
+
+  await Tone.start();
+
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
+
+  lanterns = [];
+  particles = [];
+  lastGroupReleaseFrame = -999;
+
+  scheduleMidi(midiData);
+  Tone.Transport.start();
+
+  isPlaying = true;
+  isPaused = false;
+
+  document.getElementById("pauseBtn").innerText = "暫停";
+  document.getElementById("status").innerHTML = "已重新開始";
+});
+
+function scheduleMidi(midi){
+  midi.tracks.forEach(track => {
+    track.notes.forEach(note => {
+      Tone.Transport.schedule(time => {
+        synth.triggerAttackRelease(
+          note.name,
+          note.duration,
+          time,
+          note.velocity
+        );
+
+        createLanternFromNote(note);
+
+      }, note.time);
+    });
+  });
+}
+
+function createLanternFromNote(note){
+  if(random() > LANTERN_PROBABILITY){
+    createNoteParticles(note);
+    return;
+  }
+
+  let pitch = note.midi;
+  let velocity = note.velocity;
+
+  let hue;
+
+  if(pitch < 55){
+    hue = random(28, 42);
+  }
+  else if(pitch < 72){
+    hue = random(15, 30);
+  }
+  else{
+    hue = random(38, 55);
+  }
+
+  let size = map(velocity, 0, 1, 38, 76);
+  let x = random(width * 0.18, width * 0.82);
+  let y = height * 0.86 + random(-20, 25);
+
+  lanterns.push(new Lantern(x, y, size, hue, velocity));
+
+  if(lanterns.length > MAX_LANTERNS){
+    releaseOldLanterns(8);
+  }
+
+  for(let i = 0; i < 15; i++){
+    particles.push(new Particle(x, y, hue));
+  }
+}
+
+function createNoteParticles(note){
+  let hue = map(note.midi, 36, 96, 25, 55, true);
+  let x = random(width * 0.18, width * 0.82);
+  let y = height * 0.86 + random(-20, 25);
+
+  for(let i = 0; i < 6; i++){
+    particles.push(new Particle(x, y, hue));
+  }
+}
+
+function releaseOldLanterns(count){
+  let releasedCount = 0;
+
+  for(let i = 0; i < lanterns.length; i++){
+    if(!lanterns[i].isReleased){
+      lanterns[i].release();
+      releasedCount++;
+    }
+
+    if(releasedCount >= count){
+      break;
+    }
+  }
+}
+
+function isBothHandsRaised(){
+  if(handsPoints.length < 2) return false;
+
+  return (
+    handsPoints[0].y < height * 0.42 &&
+    handsPoints[1].y < height * 0.42
+  );
+}
+
+class Lantern{
+  constructor(x, y, size, hue, velocity){
+    this.x = x;
+    this.y = y;
+    this.size = size;
+    this.hue = hue;
+    this.velocity = velocity;
+
+    this.vx = random(-0.15, 0.15);
+    this.vy = 0;
+
+    this.swing = random(TWO_PI);
+    this.rotation = random(-0.05, 0.05);
+
+    this.isHeld = false;
+    this.isReleased = false;
+    this.alpha = 100;
+  }
+
+  release(){
+    if(this.isReleased) return;
+
+    this.isReleased = true;
+    this.vy = random(-2.2, -1.4);
+    this.vx = random(-0.35, 0.35);
+  }
+
+  update(){
+    let releaseY = height * RELEASE_HEIGHT_RATIO;
+
+    let nearestHand = null;
+    let nearestDistance = 9999;
+
+    if(!this.isReleased){
+      for(let hp of handsPoints){
+        let d = dist(this.x, this.y, hp.x, hp.y);
+
+        if(d < nearestDistance){
+          nearestDistance = d;
+          nearestHand = hp;
+        }
+      }
+    }
+
+    let nearHand =
+      nearestHand !== null &&
+      nearestDistance < 240 &&
+      !this.isReleased;
+
+    if(nearHand){
+      this.isHeld = true;
+
+      let targetY = nearestHand.y - this.size * 1.15;
+      let targetX = nearestHand.x;
+
+      this.y += (targetY - this.y) * 0.045;
+      this.x += (targetX - this.x) * 0.014;
+
+      if(this.y < releaseY){
+        this.release();
+      }
+    }
+    else if(this.isReleased){
+      this.vy -= 0.012;
+      this.x += this.vx + sin(frameCount * 0.025 + this.swing) * 0.25;
+      this.y += this.vy;
+
+      if(this.y < height * 0.35){
+        this.alpha -= 0.35;
+      }
+    }
+    else{
+      this.x += this.vx;
+      this.y += sin(frameCount * 0.025 + this.swing) * 0.16;
+    }
+
+    this.rotation = sin(frameCount * 0.018 + this.swing) * 0.05;
+  }
+
+  display(){
+    push();
+    translate(this.x, this.y);
+    rotate(this.rotation);
+
+    let s = this.size;
+
+    drawingContext.shadowBlur = 38;
+    drawingContext.shadowColor = color(this.hue, 90, 100, 90);
+
+    noStroke();
+    fill(this.hue, 90, 100, 18 * this.alpha / 100);
+    ellipse(0, 0, s * 2.1, s * 2.6);
+
+    fill(this.hue, 80, 100, 13 * this.alpha / 100);
+    ellipse(0, 0, s * 2.8, s * 3.3);
+
+    fill(this.hue, 45, 100, 82 * this.alpha / 100);
+    stroke(this.hue, 35, 100, 85 * this.alpha / 100);
+    strokeWeight(1.3);
+
+    beginShape();
+    vertex(-s * 0.38, -s * 0.72);
+    bezierVertex(-s * 0.62, -s * 0.25, -s * 0.55, s * 0.35, -s * 0.32, s * 0.72);
+    vertex(s * 0.32, s * 0.72);
+    bezierVertex(s * 0.55, s * 0.35, s * 0.62, -s * 0.25, s * 0.38, -s * 0.72);
+    endShape(CLOSE);
+
+    noStroke();
+    fill(this.hue, 20, 100, 28 * this.alpha / 100);
+    ellipse(0, -s * 0.1, s * 0.65, s * 1.45);
+
+    stroke(this.hue, 35, 70, 60 * this.alpha / 100);
+    strokeWeight(1);
+
+    line(-s * 0.34, -s * 0.62, -s * 0.25, s * 0.62);
+    line(s * 0.34, -s * 0.62, s * 0.25, s * 0.62);
+    line(-s * 0.33, -s * 0.52, s * 0.33, -s * 0.52);
+    line(-s * 0.28, s * 0.58, s * 0.28, s * 0.58);
+
+    noStroke();
+    fill(35, 95, 100, 95 * this.alpha / 100);
+    ellipse(0, s * 0.47, s * 0.34, s * 0.24);
+
+    fill(18, 95, 100, 75 * this.alpha / 100);
+    triangle(
+      -s * 0.12, s * 0.5,
+      s * 0.12, s * 0.5,
+      0, s * 0.18 + sin(frameCount * 0.2) * 4
+    );
+
+    stroke(this.hue, 50, 95, 70 * this.alpha / 100);
+    noFill();
+    ellipse(0, s * 0.68, s * 0.55, s * 0.13);
+
+    drawingContext.shadowBlur = 0;
+
+    pop();
+  }
+
+  offscreen(){
+    return this.y < -160 || this.alpha <= 0;
+  }
+}
+
+class Particle{
+  constructor(x, y, hue){
+    this.x = x;
+    this.y = y;
+    this.hue = hue;
+    this.vx = random(-1.4, 1.4);
+    this.vy = random(-2.2, -0.4);
+    this.life = 100;
+    this.size = random(2, 6);
+  }
+
+  update(){
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.015;
+    this.life -= 1.6;
+  }
+
+  display(){
+    noStroke();
+    fill(this.hue, 90, 100, this.life);
+    circle(this.x, this.y, this.size);
+  }
+
+  dead(){
+    return this.life <= 0;
+  }
+}
+
+function updateParticles(){
+  for(let i = particles.length - 1; i >= 0; i--){
+    particles[i].update();
+    particles[i].display();
+
+    if(particles[i].dead()){
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function updateLanterns(){
+  for(let i = lanterns.length - 1; i >= 0; i--){
+    lanterns[i].update();
+    lanterns[i].display();
+
+    if(lanterns[i].offscreen()){
+      lanterns.splice(i, 1);
+    }
+  }
+}
+
+function setupMediaPipe(){
+  const videoElement = document.getElementById("video");
+
+  const hands = new Hands({
+    locateFile: file => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }
+  });
+
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+
+  hands.onResults(results => {
+    handsPoints = [];
+
+    if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
+      for(let landmarks of results.multiHandLandmarks){
+        const palm = landmarks[9];
+
+        handsPoints.push({
+          x: width - palm.x * width,
+          y: palm.y * height
+        });
+      }
+    }
+  });
+
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480
+  });
+
+  camera.start();
+}
+
+function drawHandGuide(){
+  if(handsPoints.length === 0) return;
+
+  for(let hp of handsPoints){
+    noFill();
+    stroke(45, 90, 100, 80);
+    strokeWeight(2);
+    circle(hp.x, hp.y, 85);
+
+    noStroke();
+    fill(45, 90, 100, 30);
+    circle(hp.x, hp.y, 42);
+  }
+}
+
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+}
+</script>
+
+</body>
+</html>
