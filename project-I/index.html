@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>Wish Lantern MIDI Piano</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/addons/p5.sound.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webmidi@3.1.12/dist/iife/webmidi.iife.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<style>
+body{
+  margin:0;
+  overflow:hidden;
+  background:black;
+  font-family:"Noto Sans TC", sans-serif;
+}
+
+#ui{
+  position:absolute;
+  top:20px;
+  left:20px;
+  z-index:999;
+  color:white;
+  background:rgba(0,0,0,0.45);
+  padding:14px 18px;
+  border-radius:14px;
+  backdrop-filter:blur(8px);
+  max-width:360px;
+}
+
+button{
+  padding:10px 14px;
+  font-size:15px;
+  border:none;
+  border-radius:8px;
+  cursor:pointer;
+  margin-right:6px;
+}
+
+#status{
+  margin-top:10px;
+  font-size:14px;
+  opacity:0.9;
+  line-height:1.55;
+}
+
+video{
+  display:none;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+  <button id="audioBtn">解鎖音訊</button>
+  <button id="clearBtn">清空畫面</button>
+  <div id="status">請先接上電鋼琴 MIDI，再點擊「解鎖音訊」。</div>
+</div>
+
+<video id="video"></video>
+
+<script>
+// === 全域變數宣告區 ===
+let synth;
+let liveNotes = [];
+let isAudioReady = false;
+
+let lanterns = [];
+let particles = [];
+let stars = [];
+let butterflies = [];
+
+let facePoint = null;
+let previousFaceX = null;
+let lastButterflyFrame = -999;
+
+const MAX_LANTERNS = 90;
+const MAX_BUTTERFLIES = 70;
+const BUTTERFLY_COOLDOWN = 10;
+const HEAD_SWING_THRESHOLD = 16;
+
+function setup(){
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+
+  // 建立電鋼琴音色用的 PolySynth
+  synth = new p5.PolySynth();
+  synth.setADSR(0.02, 0.3, 0.1, 0.5);
+
+  createStars();
+  setupMidiKeyboard();
+  setupMediaPipeFace();
+}
+
+function draw(){
+  drawSky();
+  drawStars();
+  drawMountains();
+
+  detectHeadSwingAndCreateButterflies();
+
+  updateParticles();
+  updateLanterns();
+  updateButterflies();
+
+  drawFaceGuide();
+  drawInstruction();
+}
+
+function setupMidiKeyboard(){
+  WebMidi.enable()
+    .then(() => {
+      if(WebMidi.inputs.length > 0){
+        let midiInput = WebMidi.inputs[0];
+        console.log("🎹 成功連接實體鍵盤:", midiInput.name);
+
+        document.getElementById("status").innerHTML =
+          `🎹 已偵測到電鋼琴：${midiInput.name}<br>每彈一個音，就會升起一盞天燈。<br>左右擺頭，會產生蝴蝶。`;
+
+        midiInput.addListener("noteon", e => {
+          let midiNum = e.note.number;
+          let noteName = e.note.name + e.note.octave;
+          let vel = e.velocity;
+
+          if(isAudioReady){
+            synth.noteAttack(noteName, vel, 0);
+          }
+
+          liveNotes.push({ num: midiNum, name: noteName, vel: vel });
+          createLanternFromMidi(midiNum, vel, noteName);
+        });
+
+        midiInput.addListener("noteoff", e => {
+          let midiNum = e.note.number;
+          let noteName = e.note.name + e.note.octave;
+
+          if(isAudioReady){
+            synth.noteRelease(noteName, 0);
+          }
+
+          liveNotes = liveNotes.filter(n => n.num !== midiNum);
+        });
+      }
+      else{
+        console.log("⚠️ 未偵測到鍵盤，請接上後重新整理。 ");
+        document.getElementById("status").innerHTML =
+          "⚠️ 未偵測到電鋼琴 MIDI。<br>請接上電鋼琴後重新整理網頁。";
+      }
+    })
+    .catch(err => {
+      console.error("WebMidi 啟動失敗:", err);
+      document.getElementById("status").innerHTML =
+        "⚠️ WebMidi 啟動失敗。<br>建議使用 Chrome / Edge，並確認瀏覽器允許 MIDI。";
+    });
+}
+
+function createLanternFromMidi(midiNum, velocity, noteName){
+  let hue;
+  if(midiNum < 55){
+    hue = random(28, 42);
+  }
+  else if(midiNum < 72){
+    hue = random(15, 30);
+  }
+  else{
+    hue = random(38, 55);
+  }
+
+  let x = map(midiNum, 21, 108, width * 0.12, width * 0.88, true);
+  x += random(-28, 28);
+
+  let y = height * 0.88 + random(-14, 24);
+  let size = map(velocity, 0, 1, 34, 78, true);
+
+  lanterns.push(new Lantern(x, y, size, hue, velocity, noteName));
+
+  while(lanterns.length > MAX_LANTERNS){
+    lanterns.shift();
+  }
+
+  for(let i = 0; i < 12; i++){
+    particles.push(new Particle(x, y, hue));
+  }
+}
+
+function detectHeadSwingAndCreateButterflies(){
+  if(!facePoint) return;
+
+  if(previousFaceX !== null){
+    let dx = facePoint.x - previousFaceX;
+
+    if(
+      abs(dx) > HEAD_SWING_THRESHOLD &&
+      frameCount - lastButterflyFrame > BUTTERFLY_COOLDOWN
+    ){
+      let count = floor(map(abs(dx), HEAD_SWING_THRESHOLD, 55, 2, 7, true));
+
+      for(let i = 0; i < count; i++){
+        butterflies.push(new Butterfly(
+          facePoint.x + random(-55, 55),
+          facePoint.y + random(-20, 55)
+        ));
+      }
+
+      while(butterflies.length > MAX_BUTTERFLIES){
+        butterflies.shift();
+      }
+
+      lastButterflyFrame = frameCount;
+    }
+  }
+
+  previousFaceX = lerp(previousFaceX ?? facePoint.x, facePoint.x, 0.45);
+}
+
+function drawSky(){
+  background(230, 65, 8);
+
+  noStroke();
+  for(let y = 0; y < height; y += 5){
+    let b = map(y, 0, height, 13, 3);
+    fill(230, 70, b, 45);
+    rect(0, y, width, 5);
+  }
+}
+
+function createStars(){
+  stars = [];
+  for(let i = 0; i < 180; i++){
+    stars.push({
+      x: random(width),
+      y: random(height * 0.72),
+      size: random(1, 3),
+      alpha: random(25, 85)
+    });
+  }
+}
+
+function drawStars(){
+  noStroke();
+  for(let s of stars){
+    fill(50, 20, 100, s.alpha);
+    circle(s.x, s.y, s.size);
+  }
+}
+
+function drawMountains(){
+  noStroke();
+
+  fill(215, 70, 10, 80);
+  beginShape();
+  vertex(0, height);
+  for(let x = 0; x <= width; x += 80){
+    let y = height * 0.68 + noise(x * 0.004) * 120;
+    vertex(x, y);
+  }
+  vertex(width, height);
+  endShape(CLOSE);
+
+  fill(220, 80, 5, 95);
+  beginShape();
+  vertex(0, height);
+  for(let x = 0; x <= width; x += 70){
+    let y = height * 0.82 + noise(x * 0.006 + 200) * 90;
+    vertex(x, y);
+  }
+  vertex(width, height);
+  endShape(CLOSE);
+}
+
+function drawInstruction(){
+  noStroke();
+  fill(0, 0, 100, 75);
+  textAlign(CENTER);
+  textSize(14);
+  text("彈奏電鋼琴：每個音符升起一盞天燈｜頭往左或右擺動：蝴蝶往上飛", width / 2, height - 30);
+}
+
+class Lantern{
+  constructor(x, y, size, hue, velocity, noteName){
+    this.x = x;
+    this.y = y;
+    this.size = size;
+    this.hue = hue;
+    this.velocity = velocity;
+    this.noteName = noteName;
+
+    this.vx = random(-0.38, 0.38);
+    this.vy = map(velocity, 0, 1, -2.15, -3.65, true);
+    this.swing = random(TWO_PI);
+    this.rotation = random(-0.05, 0.05);
+    this.alpha = 100;
+  }
+
+  update(){
+    this.vy -= 0.004;
+    this.x += this.vx + sin(frameCount * 0.025 + this.swing) * 0.28;
+    this.y += this.vy;
+
+    if(this.y < height * 0.38){
+      this.alpha -= 0.45;
+    }
+
+    this.rotation = sin(frameCount * 0.018 + this.swing) * 0.05;
+  }
+
+  display(){
+    push();
+    translate(this.x, this.y);
+    rotate(this.rotation);
+
+    let s = this.size;
+
+    drawingContext.shadowBlur = 38;
+    drawingContext.shadowColor = color(this.hue, 90, 100, 90);
+
+    noStroke();
+    fill(this.hue, 90, 100, 18 * this.alpha / 100);
+    ellipse(0, 0, s * 2.1, s * 2.6);
+
+    fill(this.hue, 80, 100, 13 * this.alpha / 100);
+    ellipse(0, 0, s * 2.8, s * 3.3);
+
+    fill(this.hue, 45, 100, 82 * this.alpha / 100);
+    stroke(this.hue, 35, 100, 85 * this.alpha / 100);
+    strokeWeight(1.3);
+
+    beginShape();
+    vertex(-s * 0.38, -s * 0.72);
+    bezierVertex(-s * 0.62, -s * 0.25, -s * 0.55, s * 0.35, -s * 0.32, s * 0.72);
+    vertex(s * 0.32, s * 0.72);
+    bezierVertex(s * 0.55, s * 0.35, s * 0.62, -s * 0.25, s * 0.38, -s * 0.72);
+    endShape(CLOSE);
+
+    noStroke();
+    fill(this.hue, 20, 100, 28 * this.alpha / 100);
+    ellipse(0, -s * 0.1, s * 0.65, s * 1.45);
+
+    stroke(this.hue, 35, 70, 60 * this.alpha / 100);
+    strokeWeight(1);
+    line(-s * 0.34, -s * 0.62, -s * 0.25, s * 0.62);
+    line(s * 0.34, -s * 0.62, s * 0.25, s * 0.62);
+    line(-s * 0.33, -s * 0.52, s * 0.33, -s * 0.52);
+    line(-s * 0.28, s * 0.58, s * 0.28, s * 0.58);
+
+    noStroke();
+    fill(35, 95, 100, 95 * this.alpha / 100);
+    ellipse(0, s * 0.47, s * 0.34, s * 0.24);
+
+    fill(18, 95, 100, 75 * this.alpha / 100);
+    triangle(
+      -s * 0.12, s * 0.5,
+      s * 0.12, s * 0.5,
+      0, s * 0.18 + sin(frameCount * 0.2) * 4
+    );
+
+    stroke(this.hue, 50, 95, 70 * this.alpha / 100);
+    noFill();
+    ellipse(0, s * 0.68, s * 0.55, s * 0.13);
+
+    drawingContext.shadowBlur = 0;
+    pop();
+  }
+
+  offscreen(){
+    return this.y < -160 || this.alpha <= 0;
+  }
+}
+
+class Butterfly {
+  constructor(x, y) {
+    this.position = createVector(x, y);
+
+    this.velocity = createVector(
+      random(-3.2, 3.2),
+      random(-5.2, -2.2)
+    );
+
+    this.wingOffset = random(TWO_PI);
+    this.size = random(20, 30);
+    this.life = 255;
+    this.swing = random(0.05, 0.1);
+    this.angle = random(-0.35, 0.35);
+    this.hue = random(35, 58);
+  }
+
+  update(){
+    this.position.x += this.velocity.x + sin(frameCount * this.swing + this.wingOffset) * 1.2;
+    this.position.y += this.velocity.y;
+    this.velocity.y += 0.018;
+    this.angle += sin(frameCount * 0.05 + this.wingOffset) * 0.006;
+    this.life -= 2.2;
+  }
+
+  display(){
+    push();
+    translate(this.position.x, this.position.y);
+    rotate(this.angle);
+
+    let flap = sin(frameCount * 0.35 + this.wingOffset);
+    let s = this.size;
+    let wingW = s * map(abs(flap), 0, 1, 0.45, 0.95);
+    let alpha = map(this.life, 0, 255, 0, 82, true);
+
+    drawingContext.shadowBlur = 20;
+    drawingContext.shadowColor = color(this.hue, 80, 100, alpha);
+
+    noStroke();
+    fill(this.hue, 55, 100, alpha);
+    ellipse(-wingW * 0.45, -s * 0.12, wingW, s * 0.82);
+    ellipse( wingW * 0.45, -s * 0.12, wingW, s * 0.82);
+
+    fill(this.hue + 8, 65, 100, alpha * 0.8);
+    ellipse(-wingW * 0.35, s * 0.24, wingW * 0.72, s * 0.55);
+    ellipse( wingW * 0.35, s * 0.24, wingW * 0.72, s * 0.55);
+
+    stroke(35, 35, 100, alpha);
+    strokeWeight(1.2);
+    line(0, -s * 0.45, 0, s * 0.45);
+    line(0, -s * 0.38, -s * 0.22, -s * 0.7);
+    line(0, -s * 0.38,  s * 0.22, -s * 0.7);
+
+    drawingContext.shadowBlur = 0;
+    pop();
+  }
+
+  dead(){
+    return this.life <= 0 || this.position.y < -80;
+  }
+}
+
+class Particle{
+  constructor(x, y, hue){
+    this.x = x;
+    this.y = y;
+    this.hue = hue;
+    this.vx = random(-1.4, 1.4);
+    this.vy = random(-3.5, -2.5);
+    this.life = 100;
+    this.size = random(2, 6);
+  }
+
+  update(){
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.015;
+    this.life -= 1.6;
+  }
+
+  display(){
+    noStroke();
+    fill(this.hue, 90, 100, this.life);
+    circle(this.x, this.y, this.size);
+  }
+
+  dead(){
+    return this.life <= 0;
+  }
+}
+
+function updateParticles(){
+  for(let i = particles.length - 1; i >= 0; i--){
+    particles[i].update();
+    particles[i].display();
+
+    if(particles[i].dead()){
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function updateLanterns(){
+  for(let i = lanterns.length - 1; i >= 0; i--){
+    lanterns[i].update();
+    lanterns[i].display();
+
+    if(lanterns[i].offscreen()){
+      lanterns.splice(i, 1);
+    }
+  }
+}
+
+function updateButterflies(){
+  for(let i = butterflies.length - 1; i >= 0; i--){
+    butterflies[i].update();
+    butterflies[i].display();
+
+    if(butterflies[i].dead()){
+      butterflies.splice(i, 1);
+    }
+  }
+}
+
+function setupMediaPipeFace(){
+  const videoElement = document.getElementById("video");
+
+  const faceMesh = new FaceMesh({
+    locateFile: file => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+    }
+  });
+
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: false,
+    minDetectionConfidence: 0.55,
+    minTrackingConfidence: 0.55
+  });
+
+  faceMesh.onResults(results => {
+    facePoint = null;
+
+    if(results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0){
+      const landmarks = results.multiFaceLandmarks[0];
+      const nose = landmarks[1];
+
+      facePoint = {
+        x: width - nose.x * width,
+        y: nose.y * height
+      };
+    }
+  });
+
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await faceMesh.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480
+  });
+
+  camera.start();
+}
+
+function drawFaceGuide(){
+  if(!facePoint) return;
+
+  noFill();
+  stroke(50, 60, 100, 55);
+  strokeWeight(2);
+  circle(facePoint.x, facePoint.y, 48);
+
+  noStroke();
+  fill(50, 55, 100, 45);
+  circle(facePoint.x, facePoint.y, 10);
+}
+
+function mousePressed(){
+  unlockAudio();
+}
+
+function touchStarted(){
+  unlockAudio();
+}
+
+function unlockAudio(){
+  if(!isAudioReady){
+    userStartAudio();
+    isAudioReady = true;
+
+    document.getElementById("audioBtn").innerText = "音訊已解鎖";
+    document.getElementById("status").innerHTML += "<br>✅ 音訊已解鎖，可以彈奏。";
+  }
+}
+
+document.getElementById("audioBtn").addEventListener("click", unlockAudio);
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  lanterns = [];
+  particles = [];
+  butterflies = [];
+});
+
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+  createStars();
+}
+</script>
+
+</body>
+</html>
