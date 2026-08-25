@@ -7,6 +7,7 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 
   <style>
@@ -34,14 +35,6 @@
   <script>
     let poseLandmarks = null;
     let smoothedPoseLandmarks = null;
-    let multiPoseLandmarks = [];
-    let smoothedMultiPoseLandmarks = [];
-    let detectedPersonCount = 0;
-    let lastPoseDetectedAt = 0;
-    let mediaPipeStatus = "正在載入雙人辨識模型...";
-    let mediaPipeError = false;
-    let currentPlayerId = 0;
-    let poseTracks = [createPoseTrack(0), createPoseTrack(1)];
     let fishes = [];
     let inkDust = [];
     let handTrails = [];
@@ -53,6 +46,14 @@
     let bodyCenterCache = null;
     let trailSampleCounter = 0;
     let mediaPipeFrameCounter = 0;
+
+    // 互動控制感：偵測到有效手勢時，降低自然亂流，讓魚群更明確跟隨。
+    let interactionStrength = 0;
+    let interactionHold = 0;
+    let interactionFlow = { x: 0, y: 0 };
+    const INTERACTION_FADE_IN = 0.22;
+    const INTERACTION_FADE_OUT = 0.035;
+    const INTERACTION_HOLD_FRAMES = 68;
 
     // MediaPipe Hands：用來偵測手掌細節。
     let handResults = null;
@@ -85,43 +86,6 @@
     let anModeHold = 0;
     let anActive = false;
     let anOrigin = null;
-
-    function createInteractionState() {
-      return {
-        prevLeftWrist: null,
-        prevRightWrist: null,
-        leftHandVelocity: { x: 0, y: 0 },
-        rightHandVelocity: { x: 0, y: 0 },
-        prevLeftPalm: null,
-        prevRightPalm: null,
-        leftPalmVelocity: { x: 0, y: 0 },
-        rightPalmVelocity: { x: 0, y: 0 },
-        twoHandModeHold: 0,
-        twoHandCircleActive: false,
-        pengModeHold: 0,
-        pengActive: false,
-        pengDirection: { x: 0, y: 0 },
-        pengOrigin: null,
-        anModeHold: 0,
-        anActive: false,
-        anOrigin: null,
-        trailSampleCounter: 0
-      };
-    }
-
-    function createPoseTrack(id) {
-      return {
-        id,
-        landmarks: null,
-        smoothedLandmarks: null,
-        center: null,
-        lastSeen: 0,
-        visible: false,
-        leftHandLandmarks: null,
-        rightHandLandmarks: null,
-        interaction: createInteractionState()
-      };
-    }
 
 
     const POSE_CONNECTIONS_LIST = [
@@ -159,7 +123,7 @@
         fishes.push(new Fish(random(width), random(height)));
       }
 
-      setupMediaPipe().catch(handleMediaPipeError);
+      setupMediaPipe();
     }
 
     // 依照真實經過時間換算速度比例。
@@ -175,11 +139,23 @@
       bodyCenterCache = null;
       updateScaleFlashWave(dt);
       drawPaperBackground();
-      updateAllPlayerInteractions(dt);
+      updateHandState(dt);
+      updatePalmState(dt);
+      updateAnMode(dt);
+      updateTwoHandMode(dt);
+      updatePengMode(dt);
+      updateInteractionState(dt);
+      updateHandTrails(dt);
 
       for (let f of fishes) {
         f.applyAmbientFlow(dt);
-        applyAllPlayerFields(f, dt);
+        f.applyBodySwirl(dt);
+        f.applyAnField(dt);
+        f.applyPengField(dt);
+        f.applyHandDirectionalFlow(dt);
+        f.applyTwoHandField(dt);
+        f.applySeparation(dt);
+        f.applyInteractionInertia(dt);
         f.update(dt);
         f.wrapSoft();
       }
@@ -187,7 +163,7 @@
       drawHandTrails();
 
       if (poseLandmarks) {
-        drawAllDetectedFigures();
+        drawWatercolorFigure();
       }
 
       for (let f of fishes) {
@@ -195,207 +171,10 @@
       }
 
       if (poseLandmarks) {
-        drawAllDetectedSkeletons();
+        drawPoseSkeleton();
+        drawPosePoints();
       }
 
-      drawDetectionStatus();
-
-    }
-
-    function loadInteractionState(state) {
-      prevLeftWrist = state.prevLeftWrist;
-      prevRightWrist = state.prevRightWrist;
-      leftHandVelocity = { ...state.leftHandVelocity };
-      rightHandVelocity = { ...state.rightHandVelocity };
-      prevLeftPalm = state.prevLeftPalm;
-      prevRightPalm = state.prevRightPalm;
-      leftPalmVelocity = { ...state.leftPalmVelocity };
-      rightPalmVelocity = { ...state.rightPalmVelocity };
-      twoHandModeHold = state.twoHandModeHold;
-      twoHandCircleActive = state.twoHandCircleActive;
-      pengModeHold = state.pengModeHold;
-      pengActive = state.pengActive;
-      pengDirection = { ...state.pengDirection };
-      pengOrigin = state.pengOrigin;
-      anModeHold = state.anModeHold;
-      anActive = state.anActive;
-      anOrigin = state.anOrigin;
-      trailSampleCounter = state.trailSampleCounter;
-    }
-
-    function saveInteractionState(state) {
-      state.prevLeftWrist = prevLeftWrist;
-      state.prevRightWrist = prevRightWrist;
-      state.leftHandVelocity = { ...leftHandVelocity };
-      state.rightHandVelocity = { ...rightHandVelocity };
-      state.prevLeftPalm = prevLeftPalm;
-      state.prevRightPalm = prevRightPalm;
-      state.leftPalmVelocity = { ...leftPalmVelocity };
-      state.rightPalmVelocity = { ...rightPalmVelocity };
-      state.twoHandModeHold = twoHandModeHold;
-      state.twoHandCircleActive = twoHandCircleActive;
-      state.pengModeHold = pengModeHold;
-      state.pengActive = pengActive;
-      state.pengDirection = { ...pengDirection };
-      state.pengOrigin = pengOrigin;
-      state.anModeHold = anModeHold;
-      state.anActive = anActive;
-      state.anOrigin = anOrigin;
-      state.trailSampleCounter = trailSampleCounter;
-    }
-
-    function activatePlayerTrack(track) {
-      currentPlayerId = track.id;
-      poseLandmarks = track.landmarks;
-      smoothedPoseLandmarks = track.smoothedLandmarks || track.landmarks;
-      leftHandLandmarks = track.leftHandLandmarks;
-      rightHandLandmarks = track.rightHandLandmarks;
-      scaledPointCache = {};
-      bodyCenterCache = null;
-      loadInteractionState(track.interaction);
-    }
-
-    function updateAllPlayerInteractions(dt) {
-      const visibleTracks = poseTracks.filter(track => track.visible && track.landmarks);
-
-      for (const track of visibleTracks) {
-        activatePlayerTrack(track);
-        updateHandState(dt);
-        updatePalmState(dt);
-        updateAnMode(dt);
-        updateTwoHandMode(dt);
-        updatePengMode(dt);
-        updateHandTrails(dt);
-        saveInteractionState(track.interaction);
-      }
-
-      const primary = visibleTracks[0];
-      if (primary) activatePlayerTrack(primary);
-    }
-
-    function applyAllPlayerFields(fish, dt) {
-      const visibleTracks = poseTracks.filter(track => track.visible && track.landmarks);
-
-      for (const track of visibleTracks) {
-        activatePlayerTrack(track);
-        fish.applyBodySwirl(dt);
-        fish.applyAnField(dt);
-        fish.applyPengField(dt);
-        fish.applyHandDirectionalFlow(dt);
-        fish.applyTwoHandField(dt);
-      }
-
-      if (visibleTracks[0]) activatePlayerTrack(visibleTracks[0]);
-    }
-
-    // 暫時切換繪圖所使用的人體資料，讓原本的單人繪圖函式可重複畫出兩人。
-    function withPoseDrawingContext(landmarks, smoothedLandmarks, drawFunction, playerId = 0) {
-      const previousPose = poseLandmarks;
-      const previousSmoothedPose = smoothedPoseLandmarks;
-      const previousPlayerId = currentPlayerId;
-
-      currentPlayerId = playerId;
-      poseLandmarks = landmarks;
-      smoothedPoseLandmarks = smoothedLandmarks || landmarks;
-      scaledPointCache = {};
-      bodyCenterCache = null;
-      drawFunction();
-
-      poseLandmarks = previousPose;
-      smoothedPoseLandmarks = previousSmoothedPose;
-      currentPlayerId = previousPlayerId;
-      scaledPointCache = {};
-      bodyCenterCache = null;
-    }
-
-    function drawAllDetectedFigures() {
-      for (let i = 0; i < multiPoseLandmarks.length; i++) {
-        withPoseDrawingContext(
-          multiPoseLandmarks[i],
-          smoothedMultiPoseLandmarks[i],
-          drawWatercolorFigure,
-          poseTracks.filter(track => track.visible)[i]?.id || 0
-        );
-      }
-    }
-
-    function drawAllDetectedSkeletons() {
-      for (let i = 0; i < multiPoseLandmarks.length; i++) {
-        withPoseDrawingContext(
-          multiPoseLandmarks[i],
-          smoothedMultiPoseLandmarks[i],
-          () => {
-            drawPoseSkeleton();
-            drawPosePoints();
-            drawPlayerIdentitySkeletonOverlay();
-          },
-          poseTracks.filter(track => track.visible)[i]?.id || 0
-        );
-      }
-
-      drawPlayerLabels();
-    }
-
-    function drawPlayerIdentitySkeletonOverlay() {
-      if (currentPlayerId !== 1) return;
-
-      push();
-      strokeCap(ROUND);
-      strokeJoin(ROUND);
-      stroke(132, 116, 190, 58);
-      strokeWeight(1.15);
-      for (const [from, to] of POSE_CONNECTIONS_LIST) {
-        const a = getScaledPoint(from);
-        const b = getScaledPoint(to);
-        if (a && b) line(a.x, a.y, b.x, b.y);
-      }
-
-      noStroke();
-      fill(132, 116, 190, 105);
-      for (const index of [15, 16]) {
-        const wrist = getScaledPoint(index);
-        if (wrist) circle(wrist.x, wrist.y, 4.4);
-      }
-      pop();
-    }
-
-    function drawPlayerLabels() {
-      for (const track of poseTracks.filter(item => item.visible && item.smoothedLandmarks)) {
-        withPoseDrawingContext(track.landmarks, track.smoothedLandmarks, () => {
-          const head = getScaledPoint(0);
-          if (!head) return;
-          push();
-          noStroke();
-          fill(track.id === 0 ? color(70, 126, 170, 205) : color(116, 104, 170, 205));
-          circle(head.x, head.y - 46, 25);
-          fill(255, 245);
-          textAlign(CENTER, CENTER);
-          textSize(13);
-          text(track.id === 0 ? "A" : "B", head.x, head.y - 46);
-          pop();
-        }, track.id);
-      }
-    }
-
-    function drawDetectionStatus() {
-      push();
-      noStroke();
-      fill(238, 244, 248, 215);
-      const panelWidth = mediaPipeError ? min(width - 32, 430) : 220;
-      rect(16, 16, panelWidth, 52, 12);
-      fill(mediaPipeError ? color(155, 58, 58, 235) : color(55, 72, 87, 220));
-      textAlign(LEFT, CENTER);
-      textSize(mediaPipeError ? 13 : 15);
-      text(mediaPipeStatus, 30, 42);
-      pop();
-    }
-
-    function handleMediaPipeError(error) {
-      console.error("MediaPipe 啟動失敗：", error);
-      mediaPipeError = true;
-      mediaPipeStatus = location.protocol === "file:"
-        ? "無法啟動攝影機：請用 localhost 或 HTTPS 開啟網頁"
-        : "雙人辨識啟動失敗，請重新整理並確認攝影機權限";
     }
 
     function createPaperLayer() {
@@ -554,6 +333,53 @@
       pengActive = pengModeHold > 0 && pengOrigin !== null;
     }
 
+    function setInteractionFlow(x, y, strength = 1.0) {
+      const len = sqrt(x * x + y * y);
+      if (len < 0.001) return;
+      const nx = x / len;
+      const ny = y / len;
+      interactionFlow.x = lerp(interactionFlow.x, nx * strength, 0.28);
+      interactionFlow.y = lerp(interactionFlow.y, ny * strength, 0.28);
+      interactionHold = INTERACTION_HOLD_FRAMES;
+    }
+
+    function updateInteractionState(dt) {
+      let activeNow = false;
+
+      if (anActive) {
+        setInteractionFlow(0, 1, 1.0);
+        activeNow = true;
+      } else if (pengActive) {
+        setInteractionFlow(pengDirection.x, pengDirection.y, 1.0);
+        activeNow = true;
+      } else if (twoHandCircleActive) {
+        // 抱圓主要靠環流本身，不強迫單一方向。
+        interactionHold = INTERACTION_HOLD_FRAMES;
+        activeNow = true;
+      } else {
+        const lSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+        const rSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+        if (lSpeed > 0.42 || rSpeed > 0.42) {
+          if (lSpeed >= rSpeed) setInteractionFlow(leftHandVelocity.x, leftHandVelocity.y, 0.92);
+          else setInteractionFlow(rightHandVelocity.x, rightHandVelocity.y, 0.92);
+          activeNow = true;
+        }
+      }
+
+      if (activeNow) {
+        interactionStrength = lerp(interactionStrength, 1, 1 - pow(1 - INTERACTION_FADE_IN, dt));
+      } else {
+        interactionHold = max(0, interactionHold - dt);
+        if (interactionHold <= 0) {
+          interactionStrength = max(0, interactionStrength - INTERACTION_FADE_OUT * dt);
+          interactionFlow.x *= pow(0.94, dt);
+          interactionFlow.y *= pow(0.94, dt);
+        } else {
+          interactionStrength = max(interactionStrength, 0.55);
+        }
+      }
+    }
+
     function updateHandTrails(dt) {
       if (!poseLandmarks) return;
 
@@ -569,8 +395,7 @@
           x: leftWrist.x,
           y: leftWrist.y,
           life: 42,
-          side: "L",
-          playerId: currentPlayerId
+          side: "L"
         });
       }
 
@@ -579,8 +404,7 @@
           x: rightWrist.x,
           y: rightWrist.y,
           life: 42,
-          side: "R",
-          playerId: currentPlayerId
+          side: "R"
         });
       }
 
@@ -600,14 +424,12 @@
       for (let i = 1; i < handTrails.length; i++) {
         let a = handTrails[i - 1];
         let b = handTrails[i];
-        if (a.side !== b.side || a.playerId !== b.playerId) continue;
+        if (a.side !== b.side) continue;
 
         let alpha = map(min(a.life, b.life), 0, 42, 0, 58);
         strokeWeight(map(min(a.life, b.life), 0, 42, 1, 4.2));
 
-        if (a.playerId === 1) {
-          stroke(132, 116, 190, alpha);
-        } else if (a.side === "L") {
+        if (a.side === "L") {
           stroke(105, 160, 205, alpha);
         } else {
           stroke(88, 145, 195, alpha);
@@ -655,13 +477,13 @@
       let h = bodyScale * 0.54;
 
       noStroke();
-      fill(65, 78, 92, 14);
+      fill(58, 70, 84, 31);
       ellipse(headX + 2, headY + 2, w * 1.28, h * 1.24);
 
-      fill(70, 84, 98, 18);
+      fill(62, 76, 90, 39);
       ellipse(headX - 1, headY + 1, w * 1.12, h * 1.08);
 
-      fill(78, 94, 108, 22);
+      fill(68, 84, 100, 47);
       ellipse(headX, headY, w, h);
 
       // 保持頭部完整水墨形狀，不再加中間亮色圓。
@@ -683,7 +505,7 @@
       };
 
       // 外層淡墨：保留水墨人體的柔軟感。
-      fill(78, 98, 116, 9);
+      fill(68, 88, 108, 24);
       beginShape();
       vertex(leftShoulder.x - bodyScale * 0.10, leftShoulder.y + bodyScale * 0.04);
       bezierVertex(
@@ -700,7 +522,7 @@
       endShape(CLOSE);
 
       // 中層身形：避免像幾何硬塊。
-      fill(84, 108, 128, 13);
+      fill(72, 96, 118, 32);
       beginShape();
       vertex(leftShoulder.x - bodyScale * 0.055, leftShoulder.y + bodyScale * 0.06);
       bezierVertex(
@@ -720,12 +542,12 @@
       strokeCap(ROUND);
       strokeJoin(ROUND);
 
-      stroke(105, 128, 146, 14);
+      stroke(88, 112, 132, 36);
       strokeWeight(bodyScale * 0.040);
       line(torsoTop.x, torsoTop.y, torsoBottom.x, torsoBottom.y);
 
       // 肩線與腰線用很淡的筆觸帶過，讓人體更細膩。
-      stroke(120, 145, 164, 13);
+      stroke(98, 124, 146, 34);
       strokeWeight(bodyScale * 0.026);
       line(
         leftShoulder.x + bodyScale * 0.025,
@@ -734,7 +556,7 @@
         rightShoulder.y + bodyScale * 0.045
       );
 
-      stroke(100, 126, 146, 11);
+      stroke(84, 108, 130, 29);
       strokeWeight(bodyScale * 0.022);
       line(
         leftHip.x + bodyScale * 0.025,
@@ -752,7 +574,7 @@
       strokeJoin(ROUND);
 
       // 改成穩定的多層淡墨，不使用每幀 random 抖動，避免手臂和雙腿閃爍。
-      stroke(92, 112, 130, 8);
+      stroke(76, 96, 116, 20);
       strokeWeight(thick * 1.65);
       beginShape();
       curveVertex(a.x, a.y);
@@ -762,7 +584,7 @@
       curveVertex(c.x, c.y);
       endShape();
 
-      stroke(92, 112, 130, 10);
+      stroke(76, 96, 116, 25);
       strokeWeight(thick * 1.25);
       beginShape();
       curveVertex(a.x, a.y);
@@ -773,7 +595,7 @@
       curveVertex(c.x, c.y);
       endShape();
 
-      stroke(108, 132, 150, 20);
+      stroke(88, 114, 136, 42);
       strokeWeight(thick * 0.78);
       beginShape();
       curveVertex(a.x, a.y);
@@ -801,7 +623,7 @@
         let b = getScaledPoint(pair[1]);
         if (!a || !b) continue;
 
-        stroke(116, 140, 160, 42);
+        stroke(92, 118, 142, 76);
         strokeWeight(1.05);
         line(a.x, a.y, b.x, b.y);
       }
@@ -826,7 +648,7 @@
         };
 
         // 肩膀線：比原本更短、更淡。
-        stroke(112, 136, 156, 42);
+        stroke(90, 114, 138, 76);
         strokeWeight(1.2);
         line(
           ls.x + bodyScale * 0.06,
@@ -836,7 +658,7 @@
         );
 
         // 髖部線：柔和收短。
-        stroke(112, 136, 156, 34);
+        stroke(90, 114, 138, 65);
         strokeWeight(1.05);
         line(
           lh.x + bodyScale * 0.05,
@@ -846,7 +668,7 @@
         );
 
         // 中軸線：置中直線，避免看起來像歪掉的支幹。
-        stroke(100, 126, 148, 38);
+        stroke(78, 104, 128, 72);
         strokeWeight(1.15);
         line(spineTop.x, spineTop.y, spineBottom.x, spineBottom.y);
       }
@@ -867,15 +689,15 @@
 
         if (i === 15 || i === 16) {
           r = 4.0;
-          alpha = 88;
+          alpha = 142;
           fill(88, 152, 205, alpha);
         } else if (i === 11 || i === 12 || i === 23 || i === 24) {
           r = 3.0;
-          alpha = 48;
+          alpha = 82;
           fill(108, 132, 152, alpha);
         } else {
           r = 2.4;
-          alpha = 34;
+          alpha = 61;
           fill(118, 140, 158, alpha);
         }
 
@@ -945,8 +767,10 @@ class Fish {
           t + this.seed
         ) * TWO_PI * 2.0;
 
-        this.vx += cos(angle) * 0.13 * dt;
-        this.vy += sin(angle) * 0.13 * dt;
+        // 有明確互動時把自然亂流壓低，避免使用者覺得魚不受控制。
+        const ambientFactor = lerp(1.0, 0.24, interactionStrength);
+        this.vx += cos(angle) * 0.13 * ambientFactor * dt;
+        this.vy += sin(angle) * 0.13 * ambientFactor * dt;
       }
 
       applyBodySwirl(dt) {
@@ -960,7 +784,7 @@ class Fish {
         let d = sqrt(dx * dx + dy * dy);
 
         if (d < 250 && d > 1) {
-          let swirl = 0.018;
+          let swirl = 0.018 * lerp(1.0, 0.28, interactionStrength);
           this.vx += (-dy / d) * swirl * dt;
           this.vy += (dx / d) * swirl * dt;
         }
@@ -1016,8 +840,8 @@ class Fish {
         const ny = dirY / dirLen;
 
         // 遠場：整群魚都能感受到「掤」向外撐出的方向。
-        this.vx += nx * 0.045 * dt;
-        this.vy += ny * 0.045 * dt;
+        this.vx += nx * 0.085 * dt;
+        this.vy += ny * 0.085 * dt;
 
         // 近場：靠近雙手前方的魚，會更明顯被推出去。
         const dx = this.x - pengOrigin.x;
@@ -1026,7 +850,7 @@ class Fish {
         const radius = 330;
 
         if (d < radius && d > 1) {
-          const strength = map(d, 0, radius, 0.52, 0.04);
+          const strength = map(d, 0, radius, 0.82, 0.08);
           const forwardness = constrain((dx * nx + dy * ny) / radius, -0.35, 1);
           const pushBoost = map(forwardness, -0.35, 1, 0.45, 1.25);
 
@@ -1036,7 +860,7 @@ class Fish {
           // 一點點橫向散開，讓它不是整排平移，而是像水被撐開。
           const sideX = -ny;
           const sideY = nx;
-          const spread = map(d, 0, radius, 0.10, 0.0);
+          const spread = map(d, 0, radius, 0.028, 0.0);
           this.vx += sideX * random(-spread, spread) * dt;
           this.vy += sideY * random(-spread, spread) * dt;
         }
@@ -1061,17 +885,17 @@ class Fish {
         const rightRaised = rightWrist && rightWrist.y < rightShoulder.y + 26;
 
         if (leftRaised && !rightRaised && leftElbow && leftWrist) {
-          this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 180, 0.015, dt);
+          this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 260, 0.038, dt);
         } else if (rightRaised && !leftRaised && rightElbow && rightWrist) {
-          this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 180, 0.015, dt);
+          this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 260, 0.038, dt);
         } else if (leftRaised && rightRaised) {
           const leftSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
           const rightSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
 
           if (leftSpeed > rightSpeed * 1.25 && leftElbow && leftWrist) {
-            this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 180, 0.015, dt);
+            this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 260, 0.038, dt);
           } else if (rightSpeed > leftSpeed * 1.25 && rightElbow && rightWrist) {
-            this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 180, 0.015, dt);
+            this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 260, 0.038, dt);
           }
         }
       }
@@ -1098,16 +922,17 @@ class Fish {
 
         if (d > radius || d < 1) return;
 
-        let strength = map(d, 0, radius, 0.42, 0.04);
+        let strength = map(d, 0, radius, 0.72, 0.08);
         this.vx += dirX * strength * dt;
         this.vy += dirY * strength * dt;
 
-        this.vx += dirX * 0.08 * dt;
-        this.vy += dirY * 0.08 * dt;
+        this.vx += dirX * 0.16 * dt;
+        this.vy += dirY * 0.16 * dt;
 
         let sideX = -dirY;
         let sideY = dirX;
-        let spread = map(d, 0, radius, 0.05, 0.0);
+        // 只保留極少量側向差異，讓魚有群游感但不顯得亂。
+        let spread = map(d, 0, radius, 0.018, 0.0);
         this.vx += sideX * random(-spread, spread) * dt;
         this.vy += sideY * random(-spread, spread) * dt;
       }
@@ -1125,20 +950,63 @@ class Fish {
         let handSpan = dist(leftWrist.x, leftWrist.y, rightWrist.x, rightWrist.y);
         let d = dist(this.x, this.y, mid.x, mid.y);
 
-        let fieldRadius = handSpan * 1.18 + 95;
+        let fieldRadius = handSpan * 1.42 + 125;
         if (d > fieldRadius || d < 1) return;
 
-        let pull = map(d, 0, fieldRadius, 0.12, 0);
-        this.vx += (mid.x - this.x) * 0.0012 * dt;
-        this.vy += (mid.y - this.y) * 0.0012 * dt;
+        let pull = map(d, 0, fieldRadius, 0.08, 0);
+        // 吸引力降低、環流提高，避免所有魚黏成一團。
+        this.vx += (mid.x - this.x) * 0.00072 * dt;
+        this.vy += (mid.y - this.y) * 0.00072 * dt;
 
-        this.vx += (-(this.y - mid.y)) * 0.00095 * dt;
-        this.vy += ((this.x - mid.x)) * 0.00095 * dt;
+        this.vx += (-(this.y - mid.y)) * 0.00155 * dt;
+        this.vy += ((this.x - mid.x)) * 0.00155 * dt;
 
-        this.vx += random(-pull, pull) * 0.18 * dt;
-        this.vy += random(-pull, pull) * 0.18 * dt;
+        this.vx += random(-pull, pull) * 0.06 * dt;
+        this.vy += random(-pull, pull) * 0.06 * dt;
       }
 
+
+      applySeparation(dt) {
+        // 輕量分離力：只檢查部分鄰居，避免魚群黏在一起或大幅增加效能負擔。
+        const desired = twoHandCircleActive ? max(30, this.size * 1.72) : max(22, this.size * 1.38);
+        let steerX = 0;
+        let steerY = 0;
+        let count = 0;
+        const checks = twoHandCircleActive ? 28 : 18;
+
+        for (let i = 0; i < checks; i++) {
+          const other = fishes[(int(this.seed * 37 + frameCount * 3 + i * 17)) % fishes.length];
+          if (!other || other === this) continue;
+
+          const dx = this.x - other.x;
+          const dy = this.y - other.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 1 && d2 < desired * desired) {
+            const d = sqrt(d2);
+            const weight = (desired - d) / desired;
+            steerX += (dx / d) * weight;
+            steerY += (dy / d) * weight;
+            count++;
+          }
+        }
+
+        if (count > 0) {
+          const sepPower = twoHandCircleActive
+            ? lerp(0.24, 0.40, interactionStrength)
+            : lerp(0.11, 0.22, interactionStrength);
+          this.vx += (steerX / count) * sepPower * dt;
+          this.vy += (steerY / count) * sepPower * dt;
+        }
+      }
+
+      applyInteractionInertia(dt) {
+        if (interactionStrength <= 0.02) return;
+        if (twoHandCircleActive) return;
+
+        // 動作停止後仍保留短暫水流方向，讓慢速動作的長輩也能清楚看見控制結果。
+        this.vx += interactionFlow.x * 0.055 * interactionStrength * dt;
+        this.vy += interactionFlow.y * 0.055 * interactionStrength * dt;
+      }
 
       update(dt) {
         this.flashCooldown = max(0, this.flashCooldown - dt);
@@ -1631,184 +1499,30 @@ class Fish {
       }
     }
 
-    function smoothOnePose(newLandmarks, previousLandmarks) {
-      if (!newLandmarks) return null;
-      if (!previousLandmarks || previousLandmarks.length !== newLandmarks.length) {
-        return newLandmarks.map(point => ({ ...point }));
-      }
-
-      const smoothAmount = 0.16;
-      return newLandmarks.map((point, index) => {
-        const previous = previousLandmarks[index];
-        if (!previous || !point) return point ? { ...point } : previous;
-
-        const visibility = point.visibility ?? 1;
-        if (visibility < 0.18) {
-          return {
-            ...previous,
-            visibility: max(0.32, (previous.visibility ?? 0.5) * 0.96)
-          };
-        }
-
-        return {
-          ...point,
-          x: lerp(previous.x, point.x, smoothAmount),
-          y: lerp(previous.y, point.y, smoothAmount),
-          z: lerp(previous.z || 0, point.z || 0, smoothAmount),
-          visibility: lerp(previous.visibility ?? visibility, visibility, smoothAmount)
-        };
-      });
-    }
-
-    function getPoseCenterX(landmarks) {
-      const indices = [11, 12, 23, 24];
-      const points = indices.map(index => landmarks[index]).filter(Boolean);
-      if (points.length === 0) return 0.5;
-      return points.reduce((sum, point) => sum + point.x, 0) / points.length;
-    }
-
-    function getPoseCenter(landmarks) {
-      const indices = [11, 12, 23, 24];
-      const points = indices.map(index => landmarks[index]).filter(Boolean);
-      if (points.length === 0) return { x: 0.5, y: 0.5 };
-      return {
-        x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
-        y: points.reduce((sum, point) => sum + point.y, 0) / points.length
-      };
-    }
-
-    function normalizedCenterDistance(a, b) {
-      if (!a || !b) return Infinity;
-      return Math.hypot(a.x - b.x, a.y - b.y);
-    }
-
-    function assignDetectionToTrack(track, landmarks, now) {
-      const center = getPoseCenter(landmarks);
-      track.landmarks = landmarks;
-      track.smoothedLandmarks = smoothOnePose(landmarks, track.smoothedLandmarks);
-      track.center = center;
-      track.lastSeen = now;
-      track.visible = true;
-    }
-
-    function updateMultiplePoses(detectedPoses) {
-      const now = performance.now();
-      const detections = detectedPoses.slice(0, 2).map(landmarks => ({
-        landmarks,
-        center: getPoseCenter(landmarks)
-      }));
-
-      const assignedTrackIds = new Set();
-
-      if (detections.length === 2 && poseTracks[0].center && poseTracks[1].center) {
-        const directCost =
-          normalizedCenterDistance(detections[0].center, poseTracks[0].center) +
-          normalizedCenterDistance(detections[1].center, poseTracks[1].center);
-        const crossedCost =
-          normalizedCenterDistance(detections[0].center, poseTracks[1].center) +
-          normalizedCenterDistance(detections[1].center, poseTracks[0].center);
-        const assignment = directCost <= crossedCost
-          ? [[poseTracks[0], detections[0]], [poseTracks[1], detections[1]]]
-          : [[poseTracks[1], detections[0]], [poseTracks[0], detections[1]]];
-
-        for (const [track, detection] of assignment) {
-          assignDetectionToTrack(track, detection.landmarks, now);
-          assignedTrackIds.add(track.id);
-        }
-      } else {
-        const remainingDetections = [...detections];
-
-        // 先把偵測結果配給距離上一幀位置最近的人物 ID。
-        while (remainingDetections.length > 0) {
-          let best = null;
-          for (const detection of remainingDetections) {
-            for (const track of poseTracks) {
-              if (assignedTrackIds.has(track.id) || !track.center) continue;
-              const distance = normalizedCenterDistance(detection.center, track.center);
-              if (!best || distance < best.distance) best = { detection, track, distance };
-            }
-          }
-
-          if (!best || best.distance > 0.42) break;
-          assignDetectionToTrack(best.track, best.detection.landmarks, now);
-          assignedTrackIds.add(best.track.id);
-          remainingDetections.splice(remainingDetections.indexOf(best.detection), 1);
-        }
-
-        // 新進入畫面的人才依左右建立 A、B，不再每一幀重新排序。
-        remainingDetections.sort((a, b) => b.center.x - a.center.x);
-        for (const detection of remainingDetections) {
-          const freeTrack = poseTracks.find(track => !assignedTrackIds.has(track.id));
-          if (!freeTrack) break;
-          assignDetectionToTrack(freeTrack, detection.landmarks, now);
-          assignedTrackIds.add(freeTrack.id);
-        }
-      }
-
-      for (const track of poseTracks) {
-        if (!assignedTrackIds.has(track.id)) {
-          track.visible = now - track.lastSeen < 220;
-          if (!track.visible && now - track.lastSeen > 700) {
-            track.landmarks = null;
-            track.smoothedLandmarks = null;
-            track.center = null;
-            track.leftHandLandmarks = null;
-            track.rightHandLandmarks = null;
-          }
-        }
-      }
-
-      const visibleTracks = poseTracks.filter(track => track.visible && track.landmarks);
-      multiPoseLandmarks = visibleTracks.map(track => track.landmarks);
-      smoothedMultiPoseLandmarks = visibleTracks.map(track => track.smoothedLandmarks);
-      detectedPersonCount = detectedPoses.length;
-      mediaPipeStatus = `辨識人數：${detectedPersonCount} / 2`;
-
-      // A、B 兩人都具有獨立的動作狀態，魚群會同時受到兩人的氣場影響。
-      poseLandmarks = visibleTracks[0]?.landmarks || null;
-      smoothedPoseLandmarks = visibleTracks[0]?.smoothedLandmarks || null;
-      poseReady = detectedPersonCount > 0;
-
-      if (poseReady) lastPoseDetectedAt = performance.now();
-    }
-
-    async function setupMediaPipe() {
+    function setupMediaPipe() {
       const videoElement = document.getElementById("input_video");
 
-      const visionModule = await import(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs"
-      );
-      const vision = await visionModule.FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm"
-      );
-      const poseOptions = {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
-          },
-          runningMode: "VIDEO",
-          numPoses: 2,
-          minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-          outputSegmentationMasks: false
-      };
+      const pose = new Pose({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+      });
 
-      let poseLandmarker;
-      try {
-        poseLandmarker = await visionModule.PoseLandmarker.createFromOptions(vision, {
-          ...poseOptions,
-          baseOptions: { ...poseOptions.baseOptions, delegate: "GPU" }
-        });
-      } catch (gpuError) {
-        console.warn("GPU 模式無法啟動，改用 CPU：", gpuError);
-        poseLandmarker = await visionModule.PoseLandmarker.createFromOptions(
-          vision,
-          poseOptions
-        );
-      }
+      pose.setOptions({
+        modelComplexity: 0,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
 
-      mediaPipeStatus = "模型已載入，正在啟動攝影機...";
+      pose.onResults((results) => {
+        if (results.poseLandmarks) {
+          poseLandmarks = results.poseLandmarks;
+          smoothPoseLandmarks(results.poseLandmarks);
+          poseReady = true;
+        }
+      });
 
       const hands = new Hands({
         locateFile: (file) => {
@@ -1817,7 +1531,7 @@ class Fish {
       });
 
       hands.setOptions({
-        maxNumHands: 4,
+        maxNumHands: 2,
         modelComplexity: 0,
         minDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5
@@ -1825,47 +1539,28 @@ class Fish {
 
       hands.onResults((results) => {
         handResults = results;
-        for (const track of poseTracks) {
-          track.leftHandLandmarks = null;
-          track.rightHandLandmarks = null;
-        }
+        leftHandLandmarks = null;
+        rightHandLandmarks = null;
 
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
 
-        // 每隻手配對到距離最近的人體手腕，讓 A、B 都能使用手掌動作。
+        // 使用畫面中的左右位置分配雙手，避免前鏡頭左右標籤混淆。
         const handsWithCenter = results.multiHandLandmarks.map((landmarks) => {
           const palm = getPalmCenter(landmarks);
           return { landmarks, palm };
         }).filter(item => item.palm !== null);
 
-        const wristTargets = [];
-        for (const track of poseTracks.filter(item => item.visible && item.smoothedLandmarks)) {
-          withPoseDrawingContext(track.landmarks, track.smoothedLandmarks, () => {
-            const leftWristPoint = getScaledPoint(15);
-            const rightWristPoint = getScaledPoint(16);
-            if (leftWristPoint) wristTargets.push({ track, side: "left", point: leftWristPoint });
-            if (rightWristPoint) wristTargets.push({ track, side: "right", point: rightWristPoint });
-          }, track.id);
-        }
+        handsWithCenter.sort((a, b) => a.palm.x - b.palm.x);
 
-        const usedTargets = new Set();
-        for (const hand of handsWithCenter) {
-          let bestTarget = null;
-          let bestDistance = Infinity;
-          for (const target of wristTargets) {
-            const key = `${target.track.id}-${target.side}`;
-            if (usedTargets.has(key)) continue;
-            const distance = dist(hand.palm.x, hand.palm.y, target.point.x, target.point.y);
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              bestTarget = target;
-            }
+        if (handsWithCenter.length === 1) {
+          if (handsWithCenter[0].palm.x < width * 0.5) {
+            leftHandLandmarks = handsWithCenter[0].landmarks;
+          } else {
+            rightHandLandmarks = handsWithCenter[0].landmarks;
           }
-
-          if (bestTarget && bestDistance < width * 0.22) {
-            bestTarget.track[bestTarget.side === "left" ? "leftHandLandmarks" : "rightHandLandmarks"] = hand.landmarks;
-            usedTargets.add(`${bestTarget.track.id}-${bestTarget.side}`);
-          }
+        } else if (handsWithCenter.length >= 2) {
+          leftHandLandmarks = handsWithCenter[0].landmarks;
+          rightHandLandmarks = handsWithCenter[1].landmarks;
         }
       });
 
@@ -1873,33 +1568,19 @@ class Fish {
         onFrame: async () => {
           mediaPipeFrameCounter++;
 
-          // Pose Landmarker 同時尋找最多兩人；Hands 每 3 幀跑一次以平衡效能。
+          // Pose 每幀跑，Hands 每 2 幀跑一次。
           // 太極動作主要靠手腕與身體，手掌細節只用在「按」，所以不用每幀都跑 Hands。
-          const poseResults = poseLandmarker.detectForVideo(
-            videoElement,
-            performance.now()
-          );
-          updateMultiplePoses(poseResults.landmarks || []);
+          await pose.send({ image: videoElement });
 
-          // 短暫漏偵測時清除人數，避免畫面一直顯示上一個結果。
-          if (detectedPersonCount === 0 && performance.now() - lastPoseDetectedAt > 350) {
-            multiPoseLandmarks = [];
-            smoothedMultiPoseLandmarks = [];
-            poseLandmarks = null;
-            smoothedPoseLandmarks = null;
-            poseReady = false;
-          }
-
-          if (mediaPipeFrameCounter % 3 === 0) {
+          if (mediaPipeFrameCounter % 2 === 0) {
             await hands.send({ image: videoElement });
           }
         },
-        width: 640,
-        height: 480
+        width: 480,
+        height: 360
       });
 
-      await camera.start();
-      mediaPipeStatus = "辨識人數：0 / 2";
+      camera.start();
     }
 
     function windowResized() {
