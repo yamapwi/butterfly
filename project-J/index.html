@@ -1,0 +1,2251 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tai Chi</title>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #eef3f6;
+    }
+
+    #videoWrap {
+      display: none;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="videoWrap">
+    <video id="input_video" playsinline></video>
+  </div>
+
+  <script>
+    let poseLandmarks = null;
+    let smoothedPoseLandmarks = null;
+    let fishes = [];
+    let inkDust = [];
+    let handTrails = [];
+    let scaleFlashWave = 0;
+    let scaleFlashCooldown = 120;
+    let poseReady = false;
+    let paperLayer;
+    let scaledPointCache = {};
+    let bodyCenterCache = null;
+    let trailSampleCounter = 0;
+    let mediaPipeFrameCounter = 0;
+    let startSfx = null;
+
+    // ===== Whale event (新增模組；不修改原本太極魚群與手勢設定) =====
+    let whaleSfx = null;
+    let activeWhale = null;
+    let whalePrimeHold = 0;
+    let whaleAfterCircleHold = 0;
+    let whaleRearmHold = 0;
+    let whaleCirclePrimed = false;
+    let whaleArmed = true;
+
+    // 鯨魚專用：先要求「原本抱圓已成立 + 更嚴格的抱圓形狀」持續約 0.8 秒，
+    // 確認小魚群已經明確進入抱圓狀態後，再額外維持 2.3 秒才觸發。
+    const WHALE_PRIME_FRAMES = 48;
+    const WHALE_AFTER_CIRCLE_FRAMES = 138;
+    const WHALE_REARM_FRAMES = 42; // 離開抱圓約 0.7 秒後才允許下一次觸發
+
+    // ===== Start screen: two circling fish + two-palm push to begin =====
+    let appState = "START_SCREEN"; // START_SCREEN -> START_TRIGGERED -> MAIN_INTERACTION
+    let startPushHold = 0;
+    const START_PUSH_HOLD_FRAMES = 58; // 約 0.95 秒（以 60fps 換算），讓啟動更沉穩
+    let startTransition = 0;
+    let startFishAngle = 0;
+    let startFishFade = 1;
+    let startFishDrift = 0;
+
+    // 互動控制感：偵測到有效手勢時，降低自然亂流，讓魚群更明確跟隨。
+    let interactionStrength = 0;
+    let interactionHold = 0;
+    let interactionFlow = { x: 0, y: 0 };
+    const INTERACTION_FADE_IN = 0.22;
+    const INTERACTION_FADE_OUT = 0.035;
+    const INTERACTION_HOLD_FRAMES = 68;
+
+    // MediaPipe Hands：用來偵測手掌細節。
+    let handResults = null;
+    let leftHandLandmarks = null;
+    let rightHandLandmarks = null;
+    let prevLeftPalm = null;
+    let prevRightPalm = null;
+    let leftPalmVelocity = { x: 0, y: 0 };
+    let rightPalmVelocity = { x: 0, y: 0 };
+
+
+    const FIGURE_SCALE = 0.78;
+    const FISH_COUNT = 220;
+
+    let prevLeftWrist = null;
+    let prevRightWrist = null;
+    let leftHandVelocity = { x: 0, y: 0 };
+    let rightHandVelocity = { x: 0, y: 0 };
+
+    let twoHandModeHold = 0;
+    let twoHandCircleActive = false;
+
+    // 掤：雙手同向外展時，產生一股往外撐開的氣場。
+    let pengModeHold = 0;
+    let pengActive = false;
+    let pengDirection = { x: 0, y: 0 };
+    let pengOrigin = null;
+
+    // 按：雙掌朝下並一起下沉時，魚群往下游；到底部後向左右散開。
+    let anModeHold = 0;
+    let anActive = false;
+    let anOrigin = null;
+
+
+    const POSE_CONNECTIONS_LIST = [
+      [11, 12],
+      [11, 13],
+      [13, 15],
+      [12, 14],
+      [14, 16],
+      [11, 23],
+      [12, 24],
+      [23, 24],
+      [23, 25],
+      [25, 27],
+      [24, 26],
+      [26, 28]
+    ];
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      pixelDensity(1);
+
+      bgm = new Audio('music.mp3');
+      bgm.loop = true;
+      bgm.volume = 0.5;
+
+      startSfx = new Audio('start_sfx.mp3');
+      startSfx.volume = 0.9;
+
+      whaleSfx = new Audio('whale_sfx.mp3');
+      whaleSfx.volume = 0.72;
+
+      bgm.play().catch(() => {
+        window.addEventListener('click', () => {
+          bgm.play();
+        }, { once: true });
+      });
+
+      createPaperLayer();
+
+      setupMediaPipe();
+    }
+
+    // 依照真實經過時間換算速度比例。
+    // 60fps 時 dt 約為 1；30fps 時 dt 約為 2。
+    // 這樣不同效能電腦上的魚群速度會比較一致。
+    function getDeltaScale() {
+      return constrain(deltaTime / 16.6667, 0.35, 2.5);
+    }
+
+    function draw() {
+      const dt = getDeltaScale();
+      scaledPointCache = {};
+      bodyCenterCache = null;
+      drawPaperBackground();
+
+      // 開始畫面期間只在背景偵測，不顯示正式骨架與魚群。
+      if (appState !== "MAIN_INTERACTION") {
+        updatePalmState(dt);
+        updateStartScreen(dt);
+        drawStartScreen();
+        return;
+      }
+
+      updateScaleFlashWave(dt);
+      updateHandState(dt);
+      updatePalmState(dt);
+      updateAnMode(dt);
+      updateTwoHandMode(dt);
+      updatePengMode(dt);
+      updateInteractionState(dt);
+      updateHandTrails(dt);
+
+      // 鯨魚是獨立事件，只讀取原本抱圓狀態；不改動原本魚群或手勢邏輯。
+      updateWhaleTrigger(dt);
+      if (activeWhale) {
+        activeWhale.update(dt);
+        if (activeWhale.finished) activeWhale = null;
+      }
+
+      for (let f of fishes) {
+        f.applyAmbientFlow(dt);
+        f.applyBodySwirl(dt);
+        f.applyAnField(dt);
+        f.applyPengField(dt);
+        f.applyHandDirectionalFlow(dt);
+        f.applyTwoHandField(dt);
+        f.applySeparation(dt);
+        f.applyInteractionInertia(dt);
+        f.update(dt);
+        f.wrapSoft();
+      }
+
+      // 先畫鯨魚，讓它像在人物與小魚後方的水中緩慢經過。
+      if (activeWhale) {
+        activeWhale.display();
+      }
+
+      drawHandTrails();
+
+      if (poseLandmarks) {
+        drawWatercolorFigure();
+      }
+
+      for (let f of fishes) {
+        f.display();
+      }
+
+      if (poseLandmarks) {
+        drawPoseSkeleton();
+        drawPosePoints();
+      }
+
+    }
+
+    function updateStartScreen(dt) {
+      // 開始畫面的雙魚刻意保留些微速度起伏與呼吸感，避免像機械轉盤。
+      startFishDrift += 0.0105 * dt;
+      const naturalSpeed = 0.0135 + sin(startFishDrift * 1.7) * 0.0019 + noise(startFishDrift * 0.45) * 0.0012;
+      startFishAngle += naturalSpeed * dt;
+
+      if (appState === "START_SCREEN") {
+        if (detectStartPushGesture()) {
+          startPushHold += dt;
+        } else {
+          startPushHold = max(0, startPushHold - 1.6 * dt);
+        }
+
+        if (startPushHold >= START_PUSH_HOLD_FRAMES) {
+          if (startSfx) {
+            startSfx.currentTime = 0;
+            startSfx.play().catch(() => {});
+          }
+          appState = "START_TRIGGERED";
+          startTransition = 0;
+        }
+      } else if (appState === "START_TRIGGERED") {
+        // 約 2.7～3 秒的轉場，讓開始畫面不是瞬間切換，而是像空間慢慢收束。
+        startTransition = min(1, startTransition + 0.0062 * dt);
+        startFishFade = 1 - constrain(map(startTransition, 0.58, 1, 0, 1), 0, 1);
+
+        if (startTransition >= 1) {
+          if (fishes.length === 0) {
+            for (let i = 0; i < FISH_COUNT; i++) {
+              fishes.push(new Fish(random(width), random(height)));
+            }
+          }
+          appState = "MAIN_INTERACTION";
+        }
+      }
+    }
+
+    function drawStartScreen() {
+      const cx = width * 0.5;
+      const cy = height * 0.5;
+      const baseRadius = min(width, height) * 0.108;
+
+      let shrink = 0;
+      if (appState === "START_TRIGGERED") {
+        // 前段先維持繞行，接著才慢慢被吸向中心。
+        const delayed = constrain(map(startTransition, 0.10, 1, 0, 1), 0, 1);
+        shrink = easeInOutSine(delayed);
+      }
+
+      // 待機時有極輕微的半徑呼吸與上下漂移，看起來比較像活的魚。
+      const breathing = appState === "START_SCREEN"
+        ? sin(startFishDrift * 1.25) * min(width, height) * 0.0045
+        : 0;
+      const radius = lerp(baseRadius + breathing, 2.5, shrink);
+      const size = lerp(min(width, height) * 0.056, 4.2, shrink);
+      const fade = appState === "START_TRIGGERED" ? startFishFade : 1;
+
+      const wobbleA = sin(startFishDrift * 2.1) * min(width, height) * 0.004;
+      const wobbleB = sin(startFishDrift * 2.1 + PI) * min(width, height) * 0.004;
+      drawStartFish(cx, cy + wobbleA, startFishAngle, radius, size, fade, false);
+      drawStartFish(cx, cy + wobbleB, startFishAngle + PI, radius, size, fade, true);
+
+      const textFade = appState === "START_TRIGGERED"
+        ? 1 - constrain(map(startTransition, 0.06, 0.42, 0, 1), 0, 1)
+        : 1;
+
+      if (textFade > 0.01) {
+        noStroke();
+        fill(58, 78, 96, 220 * textFade);
+        textAlign(CENTER, CENTER);
+        textSize(constrain(min(width, height) * 0.040, 28, 46));
+        text("開始", cx, cy - 2);
+
+        if (poseReady && appState === "START_SCREEN") {
+          fill(78, 98, 116, 125 * textFade);
+          textSize(constrain(min(width, height) * 0.017, 14, 20));
+          text("雙掌向前推", cx, cy + min(width, height) * 0.060);
+        }
+      }
+    }
+
+    function drawStartFish(cx, cy, angle, radius, fishSize, alphaScale, mirrorTail) {
+      const x = cx + cos(angle) * radius;
+      const y = cy + sin(angle) * radius;
+      const tangent = angle + HALF_PI;
+
+      push();
+      translate(x, y);
+      rotate(tangent);
+      if (mirrorTail) scale(1, -1);
+
+      noStroke();
+      fill(112, 178, 222, 22 * alphaScale);
+      ellipse(-fishSize * 0.20, 0, fishSize * 2.5, fishSize * 1.45);
+      fill(92, 158, 208, 88 * alphaScale);
+      beginShape();
+      vertex(fishSize * 0.72, 0);
+      bezierVertex(
+        fishSize * 0.18, -fishSize * 0.40,
+        -fishSize * 0.52, -fishSize * 0.33,
+        -fishSize * 0.80, 0
+      );
+      bezierVertex(
+        -fishSize * 0.52, fishSize * 0.33,
+        fishSize * 0.18, fishSize * 0.40,
+        fishSize * 0.72, 0
+      );
+      endShape(CLOSE);
+      fill(80, 146, 198, 95 * alphaScale);
+      triangle(
+        -fishSize * 0.72, 0,
+        -fishSize * 1.12, -fishSize * 0.30,
+        -fishSize * 1.12, fishSize * 0.30
+      );
+      fill(255, 255, 255, 36 * alphaScale);
+      ellipse(fishSize * 0.16, -fishSize * 0.08, fishSize * 0.30, fishSize * 0.13);
+      fill(40, 80, 120, 80 * alphaScale);
+      ellipse(fishSize * 0.39, -fishSize * 0.05, max(1.2, fishSize * 0.055), max(1.2, fishSize * 0.055));
+      pop();
+    }
+
+    function easeInCubic(t) {
+      return t * t * t;
+    }
+
+    function easeInOutSine(t) {
+      return -(cos(PI * t) - 1) / 2;
+    }
+
+    function detectStartPushGesture() {
+      if (!poseLandmarks) return false;
+      if (!leftHandLandmarks || !rightHandLandmarks) return false;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+      if (!ls || !rs || !lh || !rh) return false;
+
+      const leftPalm = getPalmCenter(leftHandLandmarks);
+      const rightPalm = getPalmCenter(rightHandLandmarks);
+      if (!leftPalm || !rightPalm) return false;
+
+      if (!isOpenPalm(leftHandLandmarks) || !isOpenPalm(rightHandLandmarks)) return false;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+
+      // 雙掌需位於胸前附近，避免自然垂手時誤觸。
+      const inStartZone =
+        leftPalm.y > shoulderCenter.y - bodyH * 0.45 &&
+        rightPalm.y > shoulderCenter.y - bodyH * 0.45 &&
+        leftPalm.y < hipCenter.y + bodyH * 0.10 &&
+        rightPalm.y < hipCenter.y + bodyH * 0.10;
+      if (!inStartZone) return false;
+
+      const span = dist(leftPalm.x, leftPalm.y, rightPalm.x, rightPalm.y);
+      if (span < shoulderW * 0.45 || span > shoulderW * 2.25) return false;
+
+      // 用 Hands 的 z 深度判斷雙掌相對手腕有向鏡頭推出。
+      // MediaPipe 中較負的 z 通常代表更靠近鏡頭。
+      const leftWrist3D = leftHandLandmarks[0];
+      const rightWrist3D = rightHandLandmarks[0];
+      const leftMiddleMCP = leftHandLandmarks[9];
+      const rightMiddleMCP = rightHandLandmarks[9];
+      if (!leftWrist3D || !rightWrist3D || !leftMiddleMCP || !rightMiddleMCP) return false;
+
+      const leftPalmFacingCamera = (leftMiddleMCP.z - leftWrist3D.z) < 0.06;
+      const rightPalmFacingCamera = (rightMiddleMCP.z - rightWrist3D.z) < 0.06;
+
+      // 再搭配掌心在影像中的移動量，讓動作是「推」而不是只是舉著雙手。
+      const leftSpeed = sqrt(leftPalmVelocity.x * leftPalmVelocity.x + leftPalmVelocity.y * leftPalmVelocity.y);
+      const rightSpeed = sqrt(rightPalmVelocity.x * rightPalmVelocity.x + rightPalmVelocity.y * rightPalmVelocity.y);
+      const stableOrMoving = leftSpeed < 7.5 && rightSpeed < 7.5;
+
+      return leftPalmFacingCamera && rightPalmFacingCamera && stableOrMoving;
+    }
+
+    // ===== Whale-only strict trigger =====
+    // 注意：這個函式不取代、不修改 detectTwoHandCircleGestureLoose()。
+    // 它只作為「是否召喚鯨魚」的第二層較嚴格確認。
+    function detectWhaleCircleShapeStrict() {
+      if (!poseLandmarks) return false;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const le = getScaledPoint(13);
+      const re = getScaledPoint(14);
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+
+      if (!ls || !rs || !le || !re || !lw || !rw || !lh || !rh) return false;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const wristMid = midPoint(lw, rw);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+
+      // 1. 雙手必須真的位於胸腹前方，不接受高舉、自然垂手或過低位置。
+      const handsInCircleZone =
+        lw.y > shoulderCenter.y - bodyH * 0.18 &&
+        rw.y > shoulderCenter.y - bodyH * 0.18 &&
+        lw.y < hipCenter.y + bodyH * 0.02 &&
+        rw.y < hipCenter.y + bodyH * 0.02;
+      if (!handsInCircleZone) return false;
+
+      // 2. 雙手距離需像「抱一個圓」，太近或太開都不算。
+      const span = dist(lw.x, lw.y, rw.x, rw.y);
+      if (span < shoulderW * 0.62 || span > shoulderW * 1.62) return false;
+
+      // 3. 兩手的中點不能偏離軀幹太多，降低其他揮手動作誤觸。
+      if (abs(wristMid.x - shoulderCenter.x) > shoulderW * 0.62) return false;
+      if (abs(lw.y - rw.y) > bodyH * 0.48) return false;
+
+      // 4. 兩邊手肘都必須保持彎曲，排除雙臂伸直或單純平舉。
+      const leftAngle = angleAtJoint(ls, le, lw);
+      const rightAngle = angleAtJoint(rs, re, rw);
+      if (leftAngle < 58 || leftAngle > 158) return false;
+      if (rightAngle < 58 || rightAngle > 158) return false;
+
+      // 5. 手腕不能離肩膀太遠，保持「圓」而不是向外推開。
+      const leftReach = dist(ls.x, ls.y, lw.x, lw.y);
+      const rightReach = dist(rs.x, rs.y, rw.x, rw.y);
+      if (leftReach > shoulderW * 1.55 || rightReach > shoulderW * 1.55) return false;
+
+      return true;
+    }
+
+    function angleAtJoint(a, b, c) {
+      const bax = a.x - b.x;
+      const bay = a.y - b.y;
+      const bcx = c.x - b.x;
+      const bcy = c.y - b.y;
+      const len1 = sqrt(bax * bax + bay * bay);
+      const len2 = sqrt(bcx * bcx + bcy * bcy);
+      if (len1 < 1 || len2 < 1) return 180;
+      const cosValue = constrain((bax * bcx + bay * bcy) / (len1 * len2), -1, 1);
+      return acos(cosValue) * 180 / PI;
+    }
+
+    function updateWhaleTrigger(dt) {
+      const strictCircleShape = detectWhaleCircleShapeStrict();
+
+      // 已觸發後，必須真正離開嚴格抱圓一段時間，才重新武裝。
+      if (!whaleArmed) {
+        whalePrimeHold = 0;
+        whaleAfterCircleHold = 0;
+        whaleCirclePrimed = false;
+
+        if (!strictCircleShape) {
+          whaleRearmHold += dt;
+          if (whaleRearmHold >= WHALE_REARM_FRAMES) {
+            whaleArmed = true;
+            whaleRearmHold = 0;
+          }
+        } else {
+          whaleRearmHold = 0;
+        }
+        return;
+      }
+
+      whaleRearmHold = 0;
+
+      // 第一階段：必須是「原本抱圓真的被辨識」且姿勢同時符合更嚴格的形狀。
+      // 連續維持約 0.8 秒，才視為魚群已明確進入抱圓。
+      if (!whaleCirclePrimed) {
+        if (twoHandCircleActive && strictCircleShape) {
+          whalePrimeHold += dt;
+          if (whalePrimeHold >= WHALE_PRIME_FRAMES) {
+            whaleCirclePrimed = true;
+            whaleAfterCircleHold = 0;
+          }
+        } else {
+          // 精準優先：中途不符合就重新計算，不累積零碎時間。
+          whalePrimeHold = 0;
+        }
+        return;
+      }
+
+      // 第二階段：圓圈已成立之後，仍要保持清楚的抱圓形狀 2.3 秒。
+      if (strictCircleShape) {
+        whaleAfterCircleHold += dt;
+        if (whaleAfterCircleHold >= WHALE_AFTER_CIRCLE_FRAMES) {
+          triggerWhale();
+          whaleArmed = false;
+          whaleCirclePrimed = false;
+          whalePrimeHold = 0;
+          whaleAfterCircleHold = 0;
+        }
+      } else {
+        // 抱圓一鬆掉就取消這次召喚，下一次重新開始。
+        whaleCirclePrimed = false;
+        whalePrimeHold = 0;
+        whaleAfterCircleHold = 0;
+      }
+    }
+
+    function triggerWhale() {
+      // 同一時間只保留一隻鯨魚。
+      if (!activeWhale) {
+        activeWhale = new Whale();
+      }
+
+      if (whaleSfx) {
+        whaleSfx.currentTime = 0;
+        whaleSfx.play().catch(() => {});
+      }
+    }
+
+    class Whale {
+      constructor() {
+        this.direction = random() < 0.5 ? 1 : -1;
+
+        // 再放大一階：在一般橫向投影畫面中，整條鯨魚會佔很大的視覺比例。
+        this.size = min(width, height) * random(0.315, 0.365);
+        this.margin = this.size * 2.55;
+        this.x = this.direction > 0 ? -this.margin : width + this.margin;
+        this.y = random(height * 0.23, height * 0.43);
+        this.baseY = this.y;
+
+        // 更慢：大約 34～42 秒才完整游過畫面。
+        const travelDistance = width + this.margin * 2;
+        const durationFrames = random(34, 42) * 60;
+        this.speed = travelDistance / durationFrames;
+
+        this.age = 0;
+        this.finished = false;
+        this.tailPhase = random(TWO_PI);
+        this.alpha = 0;
+      }
+
+      update(dt) {
+        this.age += dt;
+        this.x += this.direction * this.speed * dt;
+
+        // 巨型鯨魚只做很慢、很小的上下浮動。
+        this.y = this.baseY + sin(this.age * 0.0075 + this.tailPhase) * this.size * 0.018;
+
+        const fadeIn = constrain(this.age / 145, 0, 1);
+        const exitStart = this.direction > 0
+          ? width + this.size * 1.00
+          : -this.size * 1.00;
+
+        let fadeOut = 1;
+        if (this.direction > 0 && this.x > exitStart) {
+          fadeOut = constrain(map(this.x, exitStart, width + this.margin, 1, 0), 0, 1);
+        } else if (this.direction < 0 && this.x < exitStart) {
+          fadeOut = constrain(map(this.x, exitStart, -this.margin, 1, 0), 0, 1);
+        }
+
+        // 再淡一階，像遠處水中的水墨輪廓。
+        this.alpha = 0.48 * easeInOutSine(fadeIn) * fadeOut;
+
+        if (
+          (this.direction > 0 && this.x > width + this.margin) ||
+          (this.direction < 0 && this.x < -this.margin)
+        ) {
+          this.finished = true;
+        }
+      }
+
+      display() {
+        const s = this.size;
+        const a = this.alpha;
+        if (a <= 0.004) return;
+
+        push();
+        translate(this.x, this.y);
+        if (this.direction < 0) scale(-1, 1);
+
+        noStroke();
+
+        // 很淡的水氣暈染。
+        fill(155, 191, 207, 10 * a);
+        ellipse(-s * 0.12, s * 0.03, s * 4.15, s * 1.52);
+        fill(171, 204, 217, 8 * a);
+        ellipse(-s * 0.10, s * 0.05, s * 3.70, s * 1.28);
+
+        // 主體：圓厚頭部、寬胸腔、逐漸收細的尾柄；刻意不畫背鰭。
+        fill(132, 174, 193, 76 * a);
+        beginShape();
+        vertex(s * 1.28, -s * 0.02);
+        bezierVertex(
+          s * 1.22, -s * 0.42,
+          s * 0.74, -s * 0.58,
+          s * 0.14, -s * 0.52
+        );
+        bezierVertex(
+          -s * 0.54, -s * 0.46,
+          -s * 1.16, -s * 0.27,
+          -s * 1.72, -s * 0.10
+        );
+        bezierVertex(
+          -s * 1.94, -s * 0.03,
+          -s * 1.98, s * 0.05,
+          -s * 1.82, s * 0.12
+        );
+        bezierVertex(
+          -s * 1.26, s * 0.38,
+          -s * 0.55, s * 0.50,
+          s * 0.10, s * 0.44
+        );
+        bezierVertex(
+          s * 0.70, s * 0.39,
+          s * 1.13, s * 0.21,
+          s * 1.28, -s * 0.02
+        );
+        endShape(CLOSE);
+
+        // 腹部更白、更透明，讓整體更柔和。
+        fill(222, 235, 236, 80 * a);
+        beginShape();
+        vertex(s * 1.19, s * 0.04);
+        bezierVertex(
+          s * 0.91, s * 0.16,
+          s * 0.43, s * 0.34,
+          -s * 0.17, s * 0.39
+        );
+        bezierVertex(
+          -s * 0.66, s * 0.43,
+          -s * 1.08, s * 0.34,
+          -s * 1.39, s * 0.20
+        );
+        bezierVertex(
+          -s * 0.80, s * 0.44,
+          s * 0.34, s * 0.53,
+          s * 1.06, s * 0.23
+        );
+        bezierVertex(
+          s * 1.17, s * 0.16,
+          s * 1.23, s * 0.09,
+          s * 1.19, s * 0.04
+        );
+        endShape(CLOSE);
+
+        // 長胸鰭。沒有背鰭。
+        fill(121, 163, 184, 66 * a);
+        beginShape();
+        vertex(s * 0.33, s * 0.26);
+        bezierVertex(
+          s * 0.03, s * 0.50,
+          -s * 0.45, s * 0.76,
+          -s * 0.83, s * 0.68
+        );
+        bezierVertex(
+          -s * 0.55, s * 0.49,
+          -s * 0.11, s * 0.31,
+          s * 0.33, s * 0.26
+        );
+        endShape(CLOSE);
+
+        // 嘴線與喉褶都再淡一點。
+        noFill();
+        stroke(91, 132, 151, 40 * a);
+        strokeWeight(max(1, s * 0.008));
+        beginShape();
+        vertex(s * 1.18, s * 0.07);
+        bezierVertex(s * 0.79, s * 0.13, s * 0.31, s * 0.20, -s * 0.14, s * 0.21);
+        endShape();
+
+        stroke(141, 174, 187, 31 * a);
+        strokeWeight(max(0.8, s * 0.005));
+        for (let i = 0; i < 5; i++) {
+          const yy = s * (0.16 + i * 0.044);
+          beginShape();
+          vertex(s * 1.01, yy);
+          bezierVertex(
+            s * 0.66, yy + s * 0.02,
+            s * 0.27, yy + s * 0.055,
+            -s * 0.20, yy + s * 0.065
+          );
+          endShape();
+        }
+
+        // 小眼睛。
+        noStroke();
+        fill(69, 101, 118, 58 * a);
+        ellipse(s * 0.76, -s * 0.12, s * 0.030, s * 0.022);
+
+        // ===== 鯨魚尾鰭 =====
+        // 鯨魚的尾部由左右兩片寬大的 flukes 組成，但它們是連成一體的水平尾鰭，
+        // 中央只有一個凹口；不是魚類那種上下分叉的垂直尾巴。
+        // 這裡用略帶 3/4 視角的單一連續剪影，讓側視畫面仍能看出真正的鯨尾形狀。
+        push();
+        translate(-s * 1.88, s * 0.018);
+
+        // 擺幅比上一版再明顯一些，但仍維持緩慢、沉穩。
+        const tailWave = sin(this.age * 0.021 + this.tailPhase);
+        const tailSwing = tailWave * 0.205;
+        const tailLift = tailWave * s * 0.060;
+        translate(0, tailLift);
+        rotate(tailSwing);
+
+        // 尾柄：從身體平順收細後接到尾鰭中央。
+        noStroke();
+        fill(126, 168, 188, 70 * a);
+        beginShape();
+        vertex(s * 0.12, -s * 0.055);
+        bezierVertex(
+          s * 0.00, -s * 0.045,
+          -s * 0.12, -s * 0.030,
+          -s * 0.18, -s * 0.010
+        );
+        bezierVertex(
+          -s * 0.12, s * 0.030,
+          s * 0.00, s * 0.052,
+          s * 0.12, s * 0.050
+        );
+        endShape(CLOSE);
+
+        // 單一、連續的鯨尾剪影：兩片寬大 flukes 由中央連接，
+        // 外端收尖、後緣略呈 S 曲線，中央有明顯但不誇張的凹口。
+        fill(122, 164, 185, 74 * a);
+        beginShape();
+        // 與尾柄連接的中央前緣
+        vertex(-s * 0.14, 0);
+
+        // 上方 fluke：由中央向外展開，末端收尖
+        bezierVertex(
+          -s * 0.30, -s * 0.065,
+          -s * 0.58, -s * 0.235,
+          -s * 0.91, -s * 0.285
+        );
+        bezierVertex(
+          -s * 1.02, -s * 0.300,
+          -s * 1.065, -s * 0.245,
+          -s * 0.99, -s * 0.195
+        );
+        bezierVertex(
+          -s * 0.82, -s * 0.090,
+          -s * 0.58, -s * 0.018,
+          -s * 0.39, -s * 0.006
+        );
+
+        // 中央凹口：兩片 flukes 在這裡連成一體，而不是兩條分離的尾巴
+        bezierVertex(
+          -s * 0.34, -s * 0.003,
+          -s * 0.31, -s * 0.020,
+          -s * 0.28, -s * 0.038
+        );
+        bezierVertex(
+          -s * 0.255, -s * 0.020,
+          -s * 0.225, -s * 0.005,
+          -s * 0.18, 0
+        );
+
+        // 下方 fluke：透視稍微縮短，避免像上下兩條魚尾
+        bezierVertex(
+          -s * 0.34, s * 0.055,
+          -s * 0.56, s * 0.185,
+          -s * 0.80, s * 0.225
+        );
+        bezierVertex(
+          -s * 0.90, s * 0.240,
+          -s * 0.94, s * 0.195,
+          -s * 0.87, s * 0.155
+        );
+        bezierVertex(
+          -s * 0.71, s * 0.065,
+          -s * 0.43, s * 0.018,
+          -s * 0.14, 0
+        );
+        endShape(CLOSE);
+
+        // 很淡的內層暈染，只增加厚度，不另外畫第二條尾巴。
+        fill(177, 202, 212, 17 * a);
+        beginShape();
+        vertex(-s * 0.19, -s * 0.005);
+        bezierVertex(
+          -s * 0.37, -s * 0.060,
+          -s * 0.62, -s * 0.145,
+          -s * 0.84, -s * 0.175
+        );
+        bezierVertex(
+          -s * 0.69, -s * 0.075,
+          -s * 0.46, -s * 0.018,
+          -s * 0.28, -s * 0.010
+        );
+        bezierVertex(
+          -s * 0.25, -s * 0.012,
+          -s * 0.22, -s * 0.010,
+          -s * 0.19, -s * 0.005
+        );
+        endShape(CLOSE);
+        pop();
+
+        pop();
+      }
+    }
+
+    function createPaperLayer() {
+      paperLayer = createGraphics(width, height);
+      paperLayer.pixelDensity(1);
+      paperLayer.background(236, 241, 245);
+
+      paperLayer.noStroke();
+      inkDust = [];
+      for (let i = 0; i < 150; i++) {
+        inkDust.push({
+          x: random(width),
+          y: random(height),
+          r: random(8, 36),
+          a: random(8, 22),
+          stretch: random(0.85, 1.2)
+        });
+      }
+
+      for (let d of inkDust) {
+        paperLayer.fill(255, 255, 255, d.a);
+        paperLayer.ellipse(d.x, d.y, d.r, d.r * d.stretch);
+      }
+
+      for (let i = 0; i < 4; i++) {
+        paperLayer.fill(200, 215, 225, 10);
+        paperLayer.ellipse(
+          width * 0.5,
+          height * 0.8,
+          width * (0.6 + i * 0.15),
+          height * (0.28 + i * 0.03)
+        );
+      }
+    }
+
+    function drawPaperBackground() {
+      if (!paperLayer) createPaperLayer();
+      image(paperLayer, 0, 0);
+    }
+
+    function drawCornerHint() {
+      noStroke();
+      fill(60, 75, 90, 105);
+      textSize(14);
+      textAlign(LEFT, TOP);
+
+      let msg = poseReady
+        ? "單手引導、雙手抱圓、掤；雙掌朝下並下沉時觸發按"
+        : "正在啟動攝影機 / 人體偵測...";
+      text(msg, 18, 18);
+    }
+
+    function updateHandState(dt) {
+      if (!poseLandmarks) return;
+
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+
+      const smoothAmount = 1 - pow(1 - 0.35, dt);
+      const decayAmount = pow(0.8, dt);
+
+      if (lw && prevLeftWrist) {
+        // 換算成「約 60fps 下每幀的手部速度」，避免低 FPS 時手勢速度被誤判過大。
+        const lx = (lw.x - prevLeftWrist.x) / dt;
+        const ly = (lw.y - prevLeftWrist.y) / dt;
+        leftHandVelocity.x = lerp(leftHandVelocity.x, lx, smoothAmount);
+        leftHandVelocity.y = lerp(leftHandVelocity.y, ly, smoothAmount);
+      } else {
+        leftHandVelocity.x *= decayAmount;
+        leftHandVelocity.y *= decayAmount;
+      }
+
+      if (rw && prevRightWrist) {
+        const rx = (rw.x - prevRightWrist.x) / dt;
+        const ry = (rw.y - prevRightWrist.y) / dt;
+        rightHandVelocity.x = lerp(rightHandVelocity.x, rx, smoothAmount);
+        rightHandVelocity.y = lerp(rightHandVelocity.y, ry, smoothAmount);
+      } else {
+        rightHandVelocity.x *= decayAmount;
+        rightHandVelocity.y *= decayAmount;
+      }
+
+      prevLeftWrist = lw ? { x: lw.x, y: lw.y } : null;
+      prevRightWrist = rw ? { x: rw.x, y: rw.y } : null;
+    }
+
+
+    function updatePalmState(dt) {
+      if (!leftHandLandmarks && !rightHandLandmarks) return;
+
+      const leftPalm = getPalmCenter(leftHandLandmarks);
+      const rightPalm = getPalmCenter(rightHandLandmarks);
+
+      const smoothAmount = 1 - pow(1 - 0.32, dt);
+      const decayAmount = pow(0.82, dt);
+
+      if (leftPalm && prevLeftPalm) {
+        const vx = (leftPalm.x - prevLeftPalm.x) / dt;
+        const vy = (leftPalm.y - prevLeftPalm.y) / dt;
+        leftPalmVelocity.x = lerp(leftPalmVelocity.x, vx, smoothAmount);
+        leftPalmVelocity.y = lerp(leftPalmVelocity.y, vy, smoothAmount);
+      } else {
+        leftPalmVelocity.x *= decayAmount;
+        leftPalmVelocity.y *= decayAmount;
+      }
+
+      if (rightPalm && prevRightPalm) {
+        const vx = (rightPalm.x - prevRightPalm.x) / dt;
+        const vy = (rightPalm.y - prevRightPalm.y) / dt;
+        rightPalmVelocity.x = lerp(rightPalmVelocity.x, vx, smoothAmount);
+        rightPalmVelocity.y = lerp(rightPalmVelocity.y, vy, smoothAmount);
+      } else {
+        rightPalmVelocity.x *= decayAmount;
+        rightPalmVelocity.y *= decayAmount;
+      }
+
+      prevLeftPalm = leftPalm ? { x: leftPalm.x, y: leftPalm.y } : null;
+      prevRightPalm = rightPalm ? { x: rightPalm.x, y: rightPalm.y } : null;
+    }
+
+    function updateAnMode(dt) {
+      const an = detectAnGesture();
+
+      if (an) {
+        anModeHold = 18;
+        anOrigin = an.origin;
+      } else {
+        anModeHold = max(0, anModeHold - dt);
+      }
+
+      anActive = anModeHold > 0 && anOrigin !== null;
+    }
+
+    function updateTwoHandMode(dt) {
+      const circleMotionDetected = detectTwoHandCircleGestureLoose();
+
+      // 抱圓一旦被原本的動態手勢成功觸發後，
+      // 只要使用者仍維持清楚的抱圓姿勢，就持續保持魚群環繞，
+      // 不因手部停止移動而在 16 幀後自行散開。
+      // 這裡只延長「已經成立的抱圓」；不改變原本第一次觸發抱圓的條件。
+      const stillHoldingCircle =
+        twoHandCircleActive && detectWhaleCircleShapeStrict();
+
+      if (circleMotionDetected || stillHoldingCircle) {
+        twoHandModeHold = 16;
+      } else {
+        twoHandModeHold = max(0, twoHandModeHold - dt);
+      }
+
+      twoHandCircleActive = twoHandModeHold > 0;
+    }
+
+    function updatePengMode(dt) {
+      const peng = detectPengGesture();
+
+      if (peng) {
+        pengModeHold = 18;
+        pengDirection.x = lerp(pengDirection.x, peng.dir.x, 0.32);
+        pengDirection.y = lerp(pengDirection.y, peng.dir.y, 0.32);
+        pengOrigin = peng.origin;
+      } else {
+        pengModeHold = max(0, pengModeHold - dt);
+      }
+
+      pengActive = pengModeHold > 0 && pengOrigin !== null;
+    }
+
+    function setInteractionFlow(x, y, strength = 1.0) {
+      const len = sqrt(x * x + y * y);
+      if (len < 0.001) return;
+      const nx = x / len;
+      const ny = y / len;
+      interactionFlow.x = lerp(interactionFlow.x, nx * strength, 0.28);
+      interactionFlow.y = lerp(interactionFlow.y, ny * strength, 0.28);
+      interactionHold = INTERACTION_HOLD_FRAMES;
+    }
+
+    function updateInteractionState(dt) {
+      let activeNow = false;
+
+      if (anActive) {
+        setInteractionFlow(0, 1, 1.0);
+        activeNow = true;
+      } else if (pengActive) {
+        setInteractionFlow(pengDirection.x, pengDirection.y, 1.0);
+        activeNow = true;
+      } else if (twoHandCircleActive) {
+        // 抱圓主要靠環流本身，不強迫單一方向。
+        interactionHold = INTERACTION_HOLD_FRAMES;
+        activeNow = true;
+      } else {
+        const lSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+        const rSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+        if (lSpeed > 0.42 || rSpeed > 0.42) {
+          if (lSpeed >= rSpeed) setInteractionFlow(leftHandVelocity.x, leftHandVelocity.y, 0.92);
+          else setInteractionFlow(rightHandVelocity.x, rightHandVelocity.y, 0.92);
+          activeNow = true;
+        }
+      }
+
+      if (activeNow) {
+        interactionStrength = lerp(interactionStrength, 1, 1 - pow(1 - INTERACTION_FADE_IN, dt));
+      } else {
+        interactionHold = max(0, interactionHold - dt);
+        if (interactionHold <= 0) {
+          interactionStrength = max(0, interactionStrength - INTERACTION_FADE_OUT * dt);
+          interactionFlow.x *= pow(0.94, dt);
+          interactionFlow.y *= pow(0.94, dt);
+        } else {
+          interactionStrength = max(interactionStrength, 0.55);
+        }
+      }
+    }
+
+    function updateHandTrails(dt) {
+      if (!poseLandmarks) return;
+
+      trailSampleCounter += dt;
+      const shouldAddTrail = trailSampleCounter >= 1.65;
+      if (shouldAddTrail) trailSampleCounter = 0;
+
+      let leftWrist = getScaledPoint(15);
+      let rightWrist = getScaledPoint(16);
+
+      if (shouldAddTrail && leftWrist) {
+        handTrails.push({
+          x: leftWrist.x,
+          y: leftWrist.y,
+          life: 42,
+          side: "L"
+        });
+      }
+
+      if (shouldAddTrail && rightWrist) {
+        handTrails.push({
+          x: rightWrist.x,
+          y: rightWrist.y,
+          life: 42,
+          side: "R"
+        });
+      }
+
+      for (let i = handTrails.length - 1; i >= 0; i--) {
+        handTrails[i].life -= dt;
+        if (handTrails[i].life <= 0) handTrails.splice(i, 1);
+      }
+
+      if (handTrails.length > 150) {
+        handTrails.splice(0, handTrails.length - 150);
+      }
+    }
+
+    function drawHandTrails() {
+      noFill();
+
+      for (let i = 1; i < handTrails.length; i++) {
+        let a = handTrails[i - 1];
+        let b = handTrails[i];
+        if (a.side !== b.side) continue;
+
+        let alpha = map(min(a.life, b.life), 0, 42, 0, 58);
+        strokeWeight(map(min(a.life, b.life), 0, 42, 1, 4.2));
+
+        if (a.side === "L") {
+          stroke(105, 160, 205, alpha);
+        } else {
+          stroke(88, 145, 195, alpha);
+        }
+
+        line(a.x, a.y, b.x, b.y);
+      }
+    }
+
+    function drawWatercolorFigure() {
+      let nose = getScaledPoint(0);
+      let leftShoulder = getScaledPoint(11);
+      let rightShoulder = getScaledPoint(12);
+      let leftElbow = getScaledPoint(13);
+      let rightElbow = getScaledPoint(14);
+      let leftWrist = getScaledPoint(15);
+      let rightWrist = getScaledPoint(16);
+      let leftHip = getScaledPoint(23);
+      let rightHip = getScaledPoint(24);
+      let leftKnee = getScaledPoint(25);
+      let rightKnee = getScaledPoint(26);
+      let leftAnkle = getScaledPoint(27);
+      let rightAnkle = getScaledPoint(28);
+
+      if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return;
+
+      let shoulderCenter = midPoint(leftShoulder, rightShoulder);
+      let hipCenter = midPoint(leftHip, rightHip);
+      let bodyScale = dist(leftShoulder.x, leftShoulder.y, rightShoulder.x, rightShoulder.y);
+
+      drawWatercolorHead(nose, shoulderCenter, bodyScale);
+      drawWatercolorTorso(leftShoulder, rightShoulder, leftHip, rightHip, shoulderCenter, hipCenter, bodyScale);
+      drawWatercolorLimb(leftShoulder, leftElbow, leftWrist, bodyScale * 0.12);
+      drawWatercolorLimb(rightShoulder, rightElbow, rightWrist, bodyScale * 0.12);
+      drawWatercolorLimb(leftHip, leftKnee, leftAnkle, bodyScale * 0.13);
+      drawWatercolorLimb(rightHip, rightKnee, rightAnkle, bodyScale * 0.13);
+    }
+
+    function drawWatercolorHead(nose, shoulderCenter, bodyScale) {
+      if (!nose || !shoulderCenter) return;
+
+      let headX = nose.x;
+      let headY = nose.y - bodyScale * 0.10;
+      let w = bodyScale * 0.42;
+      let h = bodyScale * 0.54;
+
+      noStroke();
+      fill(58, 70, 84, 31);
+      ellipse(headX + 2, headY + 2, w * 1.28, h * 1.24);
+
+      fill(62, 76, 90, 39);
+      ellipse(headX - 1, headY + 1, w * 1.12, h * 1.08);
+
+      fill(68, 84, 100, 47);
+      ellipse(headX, headY, w, h);
+
+      // 保持頭部完整水墨形狀，不再加中間亮色圓。
+    }
+
+    function drawWatercolorTorso(leftShoulder, rightShoulder, leftHip, rightHip, shoulderCenter, hipCenter, bodyScale) {
+      if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return;
+
+      noStroke();
+
+      const torsoTop = {
+        x: shoulderCenter.x,
+        y: shoulderCenter.y + bodyScale * 0.10
+      };
+
+      const torsoBottom = {
+        x: hipCenter.x,
+        y: hipCenter.y - bodyScale * 0.04
+      };
+
+      // 外層淡墨：保留水墨人體的柔軟感。
+      fill(68, 88, 108, 24);
+      beginShape();
+      vertex(leftShoulder.x - bodyScale * 0.10, leftShoulder.y + bodyScale * 0.04);
+      bezierVertex(
+        shoulderCenter.x - bodyScale * 0.30, shoulderCenter.y + bodyScale * 0.22,
+        leftHip.x - bodyScale * 0.14, leftHip.y - bodyScale * 0.08,
+        leftHip.x - bodyScale * 0.08, leftHip.y + bodyScale * 0.02
+      );
+      vertex(rightHip.x + bodyScale * 0.08, rightHip.y + bodyScale * 0.02);
+      bezierVertex(
+        rightHip.x + bodyScale * 0.14, rightHip.y - bodyScale * 0.08,
+        shoulderCenter.x + bodyScale * 0.30, shoulderCenter.y + bodyScale * 0.22,
+        rightShoulder.x + bodyScale * 0.10, rightShoulder.y + bodyScale * 0.04
+      );
+      endShape(CLOSE);
+
+      // 中層身形：避免像幾何硬塊。
+      fill(72, 96, 118, 32);
+      beginShape();
+      vertex(leftShoulder.x - bodyScale * 0.055, leftShoulder.y + bodyScale * 0.06);
+      bezierVertex(
+        shoulderCenter.x - bodyScale * 0.20, shoulderCenter.y + bodyScale * 0.22,
+        leftHip.x - bodyScale * 0.08, leftHip.y - bodyScale * 0.02,
+        leftHip.x - bodyScale * 0.035, leftHip.y
+      );
+      vertex(rightHip.x + bodyScale * 0.035, rightHip.y);
+      bezierVertex(
+        rightHip.x + bodyScale * 0.08, rightHip.y - bodyScale * 0.02,
+        shoulderCenter.x + bodyScale * 0.20, shoulderCenter.y + bodyScale * 0.22,
+        rightShoulder.x + bodyScale * 0.055, rightShoulder.y + bodyScale * 0.06
+      );
+      endShape(CLOSE);
+
+      // 內層淡淡的中軸線：改成置中直線，不再歪歪的。
+      strokeCap(ROUND);
+      strokeJoin(ROUND);
+
+      stroke(88, 112, 132, 36);
+      strokeWeight(bodyScale * 0.040);
+      line(torsoTop.x, torsoTop.y, torsoBottom.x, torsoBottom.y);
+
+      // 肩線與腰線用很淡的筆觸帶過，讓人體更細膩。
+      stroke(98, 124, 146, 34);
+      strokeWeight(bodyScale * 0.026);
+      line(
+        leftShoulder.x + bodyScale * 0.025,
+        leftShoulder.y + bodyScale * 0.045,
+        rightShoulder.x - bodyScale * 0.025,
+        rightShoulder.y + bodyScale * 0.045
+      );
+
+      stroke(84, 108, 130, 29);
+      strokeWeight(bodyScale * 0.022);
+      line(
+        leftHip.x + bodyScale * 0.025,
+        leftHip.y - bodyScale * 0.01,
+        rightHip.x - bodyScale * 0.025,
+        rightHip.y - bodyScale * 0.01
+      );
+    }
+
+    function drawWatercolorLimb(a, b, c, thick) {
+      if (!a || !b || !c) return;
+
+      noFill();
+      strokeCap(ROUND);
+      strokeJoin(ROUND);
+
+      // 改成穩定的多層淡墨，不使用每幀 random 抖動，避免手臂和雙腿閃爍。
+      stroke(76, 96, 116, 20);
+      strokeWeight(thick * 1.65);
+      beginShape();
+      curveVertex(a.x, a.y);
+      curveVertex(a.x, a.y);
+      curveVertex(b.x, b.y);
+      curveVertex(c.x, c.y);
+      curveVertex(c.x, c.y);
+      endShape();
+
+      stroke(76, 96, 116, 25);
+      strokeWeight(thick * 1.25);
+      beginShape();
+      curveVertex(a.x, a.y);
+      curveVertex(a.x, a.y);
+      curveVertex(lerp(a.x, b.x, 0.52), lerp(a.y, b.y, 0.52));
+      curveVertex(b.x, b.y);
+      curveVertex(c.x, c.y);
+      curveVertex(c.x, c.y);
+      endShape();
+
+      stroke(88, 114, 136, 42);
+      strokeWeight(thick * 0.78);
+      beginShape();
+      curveVertex(a.x, a.y);
+      curveVertex(a.x, a.y);
+      curveVertex(b.x, b.y);
+      curveVertex(c.x, c.y);
+      curveVertex(c.x, c.y);
+      endShape();
+    }
+
+    function drawPoseSkeleton() {
+      strokeCap(ROUND);
+      strokeJoin(ROUND);
+
+      // 四肢保留細灰線，但降低存在感，讓它像淡墨輔助線。
+      const limbPairs = [
+        [11, 13], [13, 15],
+        [12, 14], [14, 16],
+        [23, 25], [25, 27],
+        [24, 26], [26, 28]
+      ];
+
+      for (let pair of limbPairs) {
+        let a = getScaledPoint(pair[0]);
+        let b = getScaledPoint(pair[1]);
+        if (!a || !b) continue;
+
+        stroke(92, 118, 142, 76);
+        strokeWeight(1.05);
+        line(a.x, a.y, b.x, b.y);
+      }
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+
+      if (ls && rs && lh && rh) {
+        const shoulderCenter = midPoint(ls, rs);
+        const hipCenter = midPoint(lh, rh);
+        const bodyScale = dist(ls.x, ls.y, rs.x, rs.y);
+
+        const spineTop = {
+          x: shoulderCenter.x,
+          y: shoulderCenter.y + bodyScale * 0.12
+        };
+        const spineBottom = {
+          x: hipCenter.x,
+          y: hipCenter.y - bodyScale * 0.05
+        };
+
+        // 肩膀線：比原本更短、更淡。
+        stroke(90, 114, 138, 76);
+        strokeWeight(1.2);
+        line(
+          ls.x + bodyScale * 0.06,
+          ls.y + bodyScale * 0.035,
+          rs.x - bodyScale * 0.06,
+          rs.y + bodyScale * 0.035
+        );
+
+        // 髖部線：柔和收短。
+        stroke(90, 114, 138, 65);
+        strokeWeight(1.05);
+        line(
+          lh.x + bodyScale * 0.05,
+          lh.y,
+          rh.x - bodyScale * 0.05,
+          rh.y
+        );
+
+        // 中軸線：置中直線，避免看起來像歪掉的支幹。
+        stroke(78, 104, 128, 72);
+        strokeWeight(1.15);
+        line(spineTop.x, spineTop.y, spineBottom.x, spineBottom.y);
+      }
+    }
+
+    function drawPosePoints() {
+      noStroke();
+
+      // 只畫主要關節點，不畫臉部/多餘小點，畫面會比較乾淨也比較不閃。
+      const keyPoints = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+
+      for (let i of keyPoints) {
+        let p = getScaledPoint(i);
+        if (!p) continue;
+
+        let r = 2.4;
+        let alpha = 38;
+
+        if (i === 15 || i === 16) {
+          r = 4.0;
+          alpha = 142;
+          fill(88, 152, 205, alpha);
+        } else if (i === 11 || i === 12 || i === 23 || i === 24) {
+          r = 3.0;
+          alpha = 82;
+          fill(108, 132, 152, alpha);
+        } else {
+          r = 2.4;
+          alpha = 61;
+          fill(118, 140, 158, alpha);
+        }
+
+        ellipse(p.x, p.y, r, r);
+      }
+    }
+
+
+
+    function updateScaleFlashWave(dt) {
+      scaleFlashCooldown = max(0, scaleFlashCooldown - dt);
+
+      // 低頻的「水面光掃過」：一次會讓少數幾隻魚反光，
+      // 比每隻魚各自一直閃更安靜，但畫面也更看得見。
+      if (scaleFlashCooldown <= 0) {
+        scaleFlashWave = 1.0;
+        scaleFlashCooldown = random(130, 260);
+      }
+
+      scaleFlashWave *= pow(0.93, dt);
+    }
+
+
+class Fish {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+
+        this.vx = random(-2.6, 2.6);
+        this.vy = random(-1.9, 1.9);
+
+        const sizeRoll = random();
+        if (sizeRoll < 0.16) {
+          // 少數大魚：約小魚 1.5～2 倍，讓魚群有主角層次。
+          this.size = random(28, 42);
+        } else if (sizeRoll < 0.46) {
+          this.size = random(19, 28);
+        } else {
+          this.size = random(12, 20);
+        }
+
+        this.seed = random(1000);
+        this.flash = 0;
+        this.flashSeed = random(10000);
+        this.flashX = random(-0.15, 0.35);
+        this.flashY = random(-0.14, 0.14);
+        this.flashCooldown = random(80, 260);
+
+        this.color = random([
+          [180, 225, 248],
+          [168, 218, 246],
+          [152, 208, 242],
+          [136, 198, 238],
+          [120, 188, 234],
+          [102, 174, 228],
+          [84, 158, 220],
+          [66, 140, 208],
+          [50, 120, 192]
+        ]);
+      }
+
+      applyAmbientFlow(dt) {
+        let t = millis() * 0.00078;
+        let angle = noise(
+          this.x * 0.0024,
+          this.y * 0.0024,
+          t + this.seed
+        ) * TWO_PI * 2.0;
+
+        // 有明確互動時把自然亂流壓低，避免使用者覺得魚不受控制。
+        const ambientFactor = lerp(1.0, 0.24, interactionStrength);
+        this.vx += cos(angle) * 0.13 * ambientFactor * dt;
+        this.vy += sin(angle) * 0.13 * ambientFactor * dt;
+      }
+
+      applyBodySwirl(dt) {
+        if (!poseLandmarks) return;
+
+        let chest = getScaledBodyCenter();
+        if (!chest) return;
+
+        let dx = this.x - chest.x;
+        let dy = this.y - chest.y;
+        let d = sqrt(dx * dx + dy * dy);
+
+        if (d < 250 && d > 1) {
+          let swirl = 0.018 * lerp(1.0, 0.28, interactionStrength);
+          this.vx += (-dy / d) * swirl * dt;
+          this.vy += (dx / d) * swirl * dt;
+        }
+      }
+
+
+      applyAnField(dt) {
+        if (!poseLandmarks) return;
+        if (!anActive || !anOrigin) return;
+
+        // 第一段：整體下沉，讓魚群像被雙掌按入水中。
+        this.vy += 0.115 * dt;
+
+        // 雙掌附近的魚會更明顯往下，像按勁從手掌下方落下。
+        const dx = this.x - anOrigin.x;
+        const dy = this.y - anOrigin.y;
+        const d = sqrt(dx * dx + dy * dy);
+        const radius = 360;
+
+        if (d < radius && d > 1) {
+          const strength = map(d, 0, radius, 0.62, 0.06);
+          this.vy += strength * dt;
+
+          // 微微左右化開，避免變成整片直線下墜。
+          const side = dx >= 0 ? 1 : -1;
+          this.vx += side * strength * 0.18 * dt;
+        }
+
+        // 第二段：魚接近底部時向左右散開，像水流沉到底後化開。
+        const bottomZone = height * 0.78;
+        if (this.y > bottomZone) {
+          const amount = map(this.y, bottomZone, height + 50, 0.05, 0.42, true);
+          const centerX = anOrigin ? anOrigin.x : width * 0.5;
+          const side = this.x < centerX ? -1 : 1;
+
+          this.vx += side * amount * dt;
+          this.vy -= amount * 0.18 * dt;
+        }
+      }
+
+      applyPengField(dt) {
+        if (!poseLandmarks) return;
+        if (!pengActive || !pengOrigin) return;
+        if (anActive) return;
+        if (twoHandCircleActive) return;
+
+        const dirX = pengDirection.x;
+        const dirY = pengDirection.y;
+        const dirLen = sqrt(dirX * dirX + dirY * dirY);
+        if (dirLen < 0.1) return;
+
+        const nx = dirX / dirLen;
+        const ny = dirY / dirLen;
+
+        // 遠場：整群魚都能感受到「掤」向外撐出的方向。
+        this.vx += nx * 0.085 * dt;
+        this.vy += ny * 0.085 * dt;
+
+        // 近場：靠近雙手前方的魚，會更明顯被推出去。
+        const dx = this.x - pengOrigin.x;
+        const dy = this.y - pengOrigin.y;
+        const d = sqrt(dx * dx + dy * dy);
+        const radius = 330;
+
+        if (d < radius && d > 1) {
+          const strength = map(d, 0, radius, 0.82, 0.08);
+          const forwardness = constrain((dx * nx + dy * ny) / radius, -0.35, 1);
+          const pushBoost = map(forwardness, -0.35, 1, 0.45, 1.25);
+
+          this.vx += nx * strength * pushBoost * dt;
+          this.vy += ny * strength * pushBoost * dt;
+
+          // 一點點橫向散開，讓它不是整排平移，而是像水被撐開。
+          const sideX = -ny;
+          const sideY = nx;
+          const spread = map(d, 0, radius, 0.028, 0.0);
+          this.vx += sideX * random(-spread, spread) * dt;
+          this.vy += sideY * random(-spread, spread) * dt;
+        }
+      }
+
+      applyHandDirectionalFlow(dt) {
+        if (!poseLandmarks) return;
+        if (twoHandCircleActive) return;
+        if (anActive) return;
+        if (pengActive) return;
+
+        const leftShoulder = getScaledPoint(11);
+        const rightShoulder = getScaledPoint(12);
+        const leftElbow = getScaledPoint(13);
+        const rightElbow = getScaledPoint(14);
+        const leftWrist = getScaledPoint(15);
+        const rightWrist = getScaledPoint(16);
+
+        if (!leftShoulder || !rightShoulder) return;
+
+        const leftRaised = leftWrist && leftWrist.y < leftShoulder.y + 26;
+        const rightRaised = rightWrist && rightWrist.y < rightShoulder.y + 26;
+
+        if (leftRaised && !rightRaised && leftElbow && leftWrist) {
+          this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 260, 0.038, dt);
+        } else if (rightRaised && !leftRaised && rightElbow && rightWrist) {
+          this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 260, 0.038, dt);
+        } else if (leftRaised && rightRaised) {
+          const leftSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+          const rightSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+
+          if (leftSpeed > rightSpeed * 1.25 && leftElbow && leftWrist) {
+            this.applyOneHandDirectionalByArm(leftElbow, leftWrist, 260, 0.038, dt);
+          } else if (rightSpeed > leftSpeed * 1.25 && rightElbow && rightWrist) {
+            this.applyOneHandDirectionalByArm(rightElbow, rightWrist, 260, 0.038, dt);
+          }
+        }
+      }
+
+      applyOneHandDirectionalByArm(joint, hand, radius, globalWeak, dt) {
+        if (!joint || !hand) return;
+
+        let armX = hand.x - joint.x;
+        let armY = hand.y - joint.y;
+        let armLen = sqrt(armX * armX + armY * armY);
+        if (armLen < 1) return;
+
+        let dirX = armX / armLen;
+        let dirY = armY / armLen;
+
+        // 遠場弱引導：整片魚都會稍微知道方向
+        this.vx += dirX * globalWeak * dt;
+        this.vy += dirY * globalWeak * dt;
+
+        // 近場強反應：靠近手的魚反應更明顯
+        let dx = this.x - hand.x;
+        let dy = this.y - hand.y;
+        let d = sqrt(dx * dx + dy * dy);
+
+        if (d > radius || d < 1) return;
+
+        let strength = map(d, 0, radius, 0.72, 0.08);
+        this.vx += dirX * strength * dt;
+        this.vy += dirY * strength * dt;
+
+        this.vx += dirX * 0.16 * dt;
+        this.vy += dirY * 0.16 * dt;
+
+        let sideX = -dirY;
+        let sideY = dirX;
+        // 只保留極少量側向差異，讓魚有群游感但不顯得亂。
+        let spread = map(d, 0, radius, 0.018, 0.0);
+        this.vx += sideX * random(-spread, spread) * dt;
+        this.vy += sideY * random(-spread, spread) * dt;
+      }
+
+      applyTwoHandField(dt) {
+        if (!poseLandmarks) return;
+        if (!twoHandCircleActive) return;
+        if (anActive) return;
+
+        let leftWrist = getScaledPoint(15);
+        let rightWrist = getScaledPoint(16);
+        if (!leftWrist || !rightWrist) return;
+
+        let mid = midPoint(leftWrist, rightWrist);
+        let handSpan = dist(leftWrist.x, leftWrist.y, rightWrist.x, rightWrist.y);
+        let d = dist(this.x, this.y, mid.x, mid.y);
+
+        let fieldRadius = handSpan * 1.42 + 125;
+        if (d > fieldRadius || d < 1) return;
+
+        let pull = map(d, 0, fieldRadius, 0.08, 0);
+        // 吸引力降低、環流提高，避免所有魚黏成一團。
+        this.vx += (mid.x - this.x) * 0.00072 * dt;
+        this.vy += (mid.y - this.y) * 0.00072 * dt;
+
+        this.vx += (-(this.y - mid.y)) * 0.00155 * dt;
+        this.vy += ((this.x - mid.x)) * 0.00155 * dt;
+
+        this.vx += random(-pull, pull) * 0.06 * dt;
+        this.vy += random(-pull, pull) * 0.06 * dt;
+      }
+
+
+      applySeparation(dt) {
+        // 輕量分離力：只檢查部分鄰居，避免魚群黏在一起或大幅增加效能負擔。
+        const desired = twoHandCircleActive ? max(30, this.size * 1.72) : max(22, this.size * 1.38);
+        let steerX = 0;
+        let steerY = 0;
+        let count = 0;
+        const checks = twoHandCircleActive ? 28 : 18;
+
+        for (let i = 0; i < checks; i++) {
+          const other = fishes[(int(this.seed * 37 + frameCount * 3 + i * 17)) % fishes.length];
+          if (!other || other === this) continue;
+
+          const dx = this.x - other.x;
+          const dy = this.y - other.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 1 && d2 < desired * desired) {
+            const d = sqrt(d2);
+            const weight = (desired - d) / desired;
+            steerX += (dx / d) * weight;
+            steerY += (dy / d) * weight;
+            count++;
+          }
+        }
+
+        if (count > 0) {
+          const sepPower = twoHandCircleActive
+            ? lerp(0.24, 0.40, interactionStrength)
+            : lerp(0.11, 0.22, interactionStrength);
+          this.vx += (steerX / count) * sepPower * dt;
+          this.vy += (steerY / count) * sepPower * dt;
+        }
+      }
+
+      applyInteractionInertia(dt) {
+        if (interactionStrength <= 0.02) return;
+        if (twoHandCircleActive) return;
+
+        // 動作停止後仍保留短暫水流方向，讓慢速動作的長輩也能清楚看見控制結果。
+        this.vx += interactionFlow.x * 0.055 * interactionStrength * dt;
+        this.vy += interactionFlow.y * 0.055 * interactionStrength * dt;
+      }
+
+      update(dt) {
+        this.flashCooldown = max(0, this.flashCooldown - dt);
+
+        // 偶爾、單隻魚、短暫反光；不要像星星一直閃。
+        if (this.flashCooldown <= 0 && random() < 0.0008 * dt) {
+          this.flash = 1.0;
+          this.flashX = random(-0.18, 0.38);
+          this.flashY = random(-0.18, 0.18);
+          this.flashCooldown = random(180, 560);
+        }
+
+        // 低頻光掃過時，讓「少數多幾隻」魚一起反光。
+        if (scaleFlashWave > 0.18 && this.flashCooldown <= 0 && random() < 0.040 * scaleFlashWave * dt) {
+          this.flash = random(0.72, 1.0);
+          this.flashX = random(-0.18, 0.38);
+          this.flashY = random(-0.18, 0.18);
+          this.flashCooldown = random(190, 520);
+        }
+
+        this.flash *= pow(0.82, dt);
+
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+
+        const drag = pow(0.985, dt);
+        this.vx *= drag;
+        this.vy *= drag;
+
+        let speed = sqrt(this.vx * this.vx + this.vy * this.vy);
+        let maxSpeed = 5.2;
+
+        if (speed > maxSpeed) {
+          this.vx = (this.vx / speed) * maxSpeed;
+          this.vy = (this.vy / speed) * maxSpeed;
+        }
+      }
+
+      wrapSoft() {
+        const m = 50;
+
+        if (this.x < -m) this.x = width + m;
+        if (this.x > width + m) this.x = -m;
+        if (this.y < -m) this.y = height + m;
+        if (this.y > height + m) this.y = -m;
+      }
+
+      display() {
+        let angle = atan2(this.vy, this.vx);
+        let c = this.color;
+
+        push();
+        translate(this.x, this.y);
+        rotate(angle);
+
+        noStroke();
+
+        fill(c[0], c[1], c[2], 12);
+        ellipse(0, 0, this.size * 2.5, this.size * 1.55);
+
+        fill(c[0], c[1], c[2], 18);
+        ellipse(-1, 0, this.size * 2.0, this.size * 1.18);
+
+        fill(c[0], c[1], c[2], 26);
+        ellipse(0, 0, this.size * 1.7, this.size * 1.0);
+
+        fill(c[0], c[1], c[2], 88);
+        beginShape();
+        vertex(this.size * 0.78, 0);
+        bezierVertex(
+          this.size * 0.18, -this.size * 0.42,
+          -this.size * 0.55, -this.size * 0.35,
+          -this.size * 0.82, 0
+        );
+        bezierVertex(
+          -this.size * 0.55, this.size * 0.35,
+          this.size * 0.18, this.size * 0.42,
+          this.size * 0.78, 0
+        );
+        endShape(CLOSE);
+
+        fill(c[0], c[1], c[2], 95);
+        triangle(
+          -this.size * 0.75, 0,
+          -this.size * 1.18, -this.size * 0.32,
+          -this.size * 1.18, this.size * 0.32
+        );
+
+        fill(255, 255, 255, 30);
+        ellipse(this.size * 0.18, -this.size * 0.09, this.size * 0.34, this.size * 0.15);
+
+        if (this.flash > 0.025) {
+          noStroke();
+
+          // 外層柔光：比上一版慢、更少，但單次更像魚鱗反光。
+          fill(180, 225, 255, 105 * this.flash);
+          ellipse(this.size * this.flashX, this.size * this.flashY, this.size * 1.35, this.size * 0.44);
+
+          // 中層亮斑：像鱗片被水面光線掃到。
+          fill(255, 255, 255, 230 * this.flash);
+          ellipse(this.size * this.flashX, this.size * this.flashY, this.size * 0.62, this.size * 0.20);
+
+          // 小白點，不做星星線條，避免躁動感。
+          fill(255, 255, 255, 185 * this.flash);
+          ellipse(this.size * (this.flashX + 0.18), this.size * (this.flashY - 0.03), this.size * 0.16, this.size * 0.10);
+        }
+
+        fill(40, 80, 120, 78);
+        ellipse(this.size * 0.42, -this.size * 0.06, 1.7, 1.7);
+
+        pop();
+      }
+    }
+
+    function getRawPoint(index) {
+      const sourceLandmarks = smoothedPoseLandmarks || poseLandmarks;
+      if (!sourceLandmarks || !sourceLandmarks[index]) return null;
+
+      let p = sourceLandmarks[index];
+      if (p.visibility !== undefined && p.visibility < 0.18) return null;
+
+      return {
+        x: (1 - p.x) * width,
+        y: p.y * height,
+        z: p.z
+      };
+    }
+
+    function getScaledBodyCenter() {
+      if (bodyCenterCache) return bodyCenterCache;
+      let ls = getRawPoint(11);
+      let rs = getRawPoint(12);
+      let lh = getRawPoint(23);
+      let rh = getRawPoint(24);
+
+      if (ls && rs && lh && rh) {
+        let rawCenter = {
+          x: (ls.x + rs.x + lh.x + rh.x) / 4,
+          y: (ls.y + rs.y + lh.y + rh.y) / 4
+        };
+        bodyCenterCache = scalePointAround(rawCenter, rawCenter, FIGURE_SCALE);
+        return bodyCenterCache;
+      }
+
+      return null;
+    }
+
+    function getScaledPoint(index) {
+      if (scaledPointCache[index]) return scaledPointCache[index];
+      let p = getRawPoint(index);
+      if (!p) return null;
+
+      let center = getRawFigureCenter();
+      if (!center) {
+        scaledPointCache[index] = p;
+        return p;
+      }
+
+      scaledPointCache[index] = scalePointAround(p, center, FIGURE_SCALE);
+      return scaledPointCache[index];
+    }
+
+    function getRawFigureCenter() {
+      let ls = getRawPoint(11);
+      let rs = getRawPoint(12);
+      let lh = getRawPoint(23);
+      let rh = getRawPoint(24);
+
+      if (ls && rs && lh && rh) {
+        return {
+          x: (ls.x + rs.x + lh.x + rh.x) / 4,
+          y: (ls.y + rs.y + lh.y + rh.y) / 4
+        };
+      }
+
+      if (ls && rs) {
+        return {
+          x: (ls.x + rs.x) / 2,
+          y: (ls.y + rs.y) / 2
+        };
+      }
+
+      return { x: width / 2, y: height / 2 };
+    }
+
+    function scalePointAround(p, center, scaleValue) {
+      return {
+        x: center.x + (p.x - center.x) * scaleValue,
+        y: center.y + (p.y - center.y) * scaleValue,
+        z: p.z
+      };
+    }
+
+    function midPoint(a, b) {
+      return {
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5
+      };
+    }
+
+    function mag(x, y) {
+      return sqrt(x * x + y * y);
+    }
+
+
+    function getScaledHandPoint(hand, index) {
+      if (!hand || !hand[index]) return null;
+      return {
+        x: (1 - hand[index].x) * width,
+        y: hand[index].y * height,
+        z: hand[index].z || 0
+      };
+    }
+
+    function getPalmCenter(hand) {
+      if (!hand) return null;
+      const wrist = getScaledHandPoint(hand, 0);
+      const indexMCP = getScaledHandPoint(hand, 5);
+      const middleMCP = getScaledHandPoint(hand, 9);
+      const ringMCP = getScaledHandPoint(hand, 13);
+      const pinkyMCP = getScaledHandPoint(hand, 17);
+
+      if (!wrist || !indexMCP || !middleMCP || !ringMCP || !pinkyMCP) return null;
+
+      return {
+        x: (wrist.x + indexMCP.x + middleMCP.x + ringMCP.x + pinkyMCP.x) / 5,
+        y: (wrist.y + indexMCP.y + middleMCP.y + ringMCP.y + pinkyMCP.y) / 5,
+        z: (wrist.z + indexMCP.z + middleMCP.z + ringMCP.z + pinkyMCP.z) / 5
+      };
+    }
+
+    function isOpenPalm(hand) {
+      if (!hand) return false;
+
+      const wrist = getScaledHandPoint(hand, 0);
+      const indexTip = getScaledHandPoint(hand, 8);
+      const middleTip = getScaledHandPoint(hand, 12);
+      const ringTip = getScaledHandPoint(hand, 16);
+      const pinkyTip = getScaledHandPoint(hand, 20);
+      const indexMCP = getScaledHandPoint(hand, 5);
+      const pinkyMCP = getScaledHandPoint(hand, 17);
+
+      if (!wrist || !indexTip || !middleTip || !ringTip || !pinkyTip || !indexMCP || !pinkyMCP) return false;
+
+      const palmWidth = max(dist(indexMCP.x, indexMCP.y, pinkyMCP.x, pinkyMCP.y), 1);
+      const avgTipDist = (
+        dist(wrist.x, wrist.y, indexTip.x, indexTip.y) +
+        dist(wrist.x, wrist.y, middleTip.x, middleTip.y) +
+        dist(wrist.x, wrist.y, ringTip.x, ringTip.y) +
+        dist(wrist.x, wrist.y, pinkyTip.x, pinkyTip.y)
+      ) / 4;
+
+      return avgTipDist > palmWidth * 1.28;
+    }
+
+    function isPalmDownApprox(hand) {
+      if (!hand) return false;
+
+      const wrist = getScaledHandPoint(hand, 0);
+      const indexMCP = getScaledHandPoint(hand, 5);
+      const middleMCP = getScaledHandPoint(hand, 9);
+      const ringMCP = getScaledHandPoint(hand, 13);
+      const pinkyMCP = getScaledHandPoint(hand, 17);
+      const indexTip = getScaledHandPoint(hand, 8);
+      const middleTip = getScaledHandPoint(hand, 12);
+      const ringTip = getScaledHandPoint(hand, 16);
+      const pinkyTip = getScaledHandPoint(hand, 20);
+
+      if (!wrist || !indexMCP || !middleMCP || !ringMCP || !pinkyMCP || !indexTip || !middleTip || !ringTip || !pinkyTip) return false;
+
+      const palmCenter = getPalmCenter(hand);
+      const avgMCPY = (indexMCP.y + middleMCP.y + ringMCP.y + pinkyMCP.y) / 4;
+      const avgTipY = (indexTip.y + middleTip.y + ringTip.y + pinkyTip.y) / 4;
+      const palmFlatness = abs(avgTipY - avgMCPY);
+      const handWidth = max(dist(indexMCP.x, indexMCP.y, pinkyMCP.x, pinkyMCP.y), 1);
+
+      // 這裡用「近似」判斷掌心朝下：手掌張開、手指不要明顯朝上，且整隻手呈較平的按掌姿態。
+      // 因為一般 webcam 的 Pose/Hands 很難真正知道掌心是否朝地板，所以用手掌形狀 + 下沉速度一起判斷。
+      const flatEnough = palmFlatness < handWidth * 1.15;
+      const notPointingUp = avgTipY > wrist.y - handWidth * 1.45;
+      const palmVisible = palmCenter !== null;
+
+      return palmVisible && isOpenPalm(hand) && flatEnough && notPointingUp;
+    }
+
+    function detectAnGesture() {
+      if (!poseLandmarks) return null;
+      if (!leftHandLandmarks || !rightHandLandmarks) return null;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+      if (!ls || !rs || !lh || !rh) return null;
+
+      const leftPalm = getPalmCenter(leftHandLandmarks);
+      const rightPalm = getPalmCenter(rightHandLandmarks);
+      if (!leftPalm || !rightPalm) return null;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+
+      const palmsOpenAndDown = isPalmDownApprox(leftHandLandmarks) && isPalmDownApprox(rightHandLandmarks);
+      if (!palmsOpenAndDown) return null;
+
+      const leftDown = leftPalmVelocity.y > 0.42;
+      const rightDown = rightPalmVelocity.y > 0.42;
+      const bothMovingDown = leftDown && rightDown;
+      if (!bothMovingDown) return null;
+
+      const palmsInFrontBodyZone =
+        leftPalm.y > shoulderCenter.y - bodyH * 0.45 &&
+        rightPalm.y > shoulderCenter.y - bodyH * 0.45 &&
+        leftPalm.y < hipCenter.y + bodyH * 0.35 &&
+        rightPalm.y < hipCenter.y + bodyH * 0.35;
+      if (!palmsInFrontBodyZone) return null;
+
+      const span = dist(leftPalm.x, leftPalm.y, rightPalm.x, rightPalm.y);
+      const handsReasonable = span > shoulderW * 0.35 && span < shoulderW * 2.55;
+      if (!handsReasonable) return null;
+
+      return {
+        origin: midPoint(leftPalm, rightPalm)
+      };
+    }
+
+    function detectPengGesture() {
+      if (!poseLandmarks) return null;
+      if (anActive) return null;
+      if (twoHandCircleActive) return null;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+
+      if (!ls || !rs || !lw || !rw || !lh || !rh) return null;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const wristMid = midPoint(lw, rw);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+
+      const lvx = leftHandVelocity.x;
+      const lvy = leftHandVelocity.y;
+      const rvx = rightHandVelocity.x;
+      const rvy = rightHandVelocity.y;
+
+      const leftSpeed = mag(lvx, lvy);
+      const rightSpeed = mag(rvx, rvy);
+      const bothMoving = leftSpeed > 0.62 && rightSpeed > 0.62;
+      if (!bothMoving) return null;
+
+      const dot = lvx * rvx + lvy * rvy;
+      const sameDirection = dot > leftSpeed * rightSpeed * 0.62;
+      if (!sameDirection) return null;
+
+      const avgX = (lvx + rvx) * 0.5;
+      const avgY = (lvy + rvy) * 0.5;
+      const avgSpeed = mag(avgX, avgY);
+      if (avgSpeed < 0.75) return null;
+
+      const handsInTaiChiZone =
+        lw.y < hipCenter.y + bodyH * 0.20 &&
+        rw.y < hipCenter.y + bodyH * 0.20 &&
+        lw.y > shoulderCenter.y - bodyH * 1.20 &&
+        rw.y > shoulderCenter.y - bodyH * 1.20;
+      if (!handsInTaiChiZone) return null;
+
+      const span = dist(lw.x, lw.y, rw.x, rw.y);
+      const handsNotTooFar = span < shoulderW * 2.55;
+      if (!handsNotTooFar) return null;
+
+      // 掤要有「從身體中心往外撐」的感覺，所以雙手平均方向需離開軀幹中心。
+      const bodyToHandsX = wristMid.x - shoulderCenter.x;
+      const bodyToHandsY = wristMid.y - shoulderCenter.y;
+      const awayDot = bodyToHandsX * avgX + bodyToHandsY * avgY;
+      const movingAwayFromBody = awayDot > -shoulderW * 0.08;
+      if (!movingAwayFromBody) return null;
+
+      return {
+        dir: {
+          x: avgX / avgSpeed,
+          y: avgY / avgSpeed
+        },
+        origin: {
+          x: wristMid.x - (avgX / avgSpeed) * shoulderW * 0.38,
+          y: wristMid.y - (avgY / avgSpeed) * shoulderW * 0.38
+        }
+      };
+    }
+
+    function detectTwoHandCircleGestureLoose() {
+      if (!poseLandmarks) return false;
+
+      const ls = getScaledPoint(11);
+      const rs = getScaledPoint(12);
+      const le = getScaledPoint(13);
+      const re = getScaledPoint(14);
+      const lw = getScaledPoint(15);
+      const rw = getScaledPoint(16);
+      const lh = getScaledPoint(23);
+      const rh = getScaledPoint(24);
+
+      if (!ls || !rs || !le || !re || !lw || !rw || !lh || !rh) return false;
+
+      const shoulderCenter = midPoint(ls, rs);
+      const hipCenter = midPoint(lh, rh);
+      const bodyH = max(dist(shoulderCenter.x, shoulderCenter.y, hipCenter.x, hipCenter.y), 1);
+      const shoulderW = max(dist(ls.x, ls.y, rs.x, rs.y), 1);
+      const wristMid = midPoint(lw, rw);
+
+      const leftSpeed = mag(leftHandVelocity.x, leftHandVelocity.y);
+      const rightSpeed = mag(rightHandVelocity.x, rightHandVelocity.y);
+      const bothMoving = leftSpeed > 0.55 && rightSpeed > 0.55;
+
+      const span = dist(lw.x, lw.y, rw.x, rw.y);
+      const handsFarEnough = span > shoulderW * 0.50 && span < shoulderW * 2.40;
+
+      const upperZone =
+        lw.y < hipCenter.y + bodyH * 0.08 &&
+        rw.y < hipCenter.y + bodyH * 0.08 &&
+        lw.y > shoulderCenter.y - bodyH * 1.10 &&
+        rw.y > shoulderCenter.y - bodyH * 1.10;
+
+      const leftBent = dist(le.x, le.y, lw.x, lw.y) < shoulderW * 1.40;
+      const rightBent = dist(re.x, re.y, rw.x, rw.y) < shoulderW * 1.40;
+      const curvedPose = leftBent && rightBent;
+
+      const relLX = lw.x - wristMid.x;
+      const relLY = lw.y - wristMid.y;
+      const relRX = rw.x - wristMid.x;
+      const relRY = rw.y - wristMid.y;
+
+      const leftRadial = abs(relLX * leftHandVelocity.x + relLY * leftHandVelocity.y);
+      const leftTangential = abs(relLX * leftHandVelocity.y - relLY * leftHandVelocity.x);
+
+      const rightRadial = abs(relRX * rightHandVelocity.x + relRY * rightHandVelocity.y);
+      const rightTangential = abs(relRX * rightHandVelocity.y - relRY * rightHandVelocity.x);
+
+      const circularish =
+        leftTangential > leftRadial * 0.70 &&
+        rightTangential > rightRadial * 0.70;
+
+      const oppositeSweep =
+        (leftHandVelocity.x * rightHandVelocity.x < -0.05) ||
+        (leftHandVelocity.y * rightHandVelocity.y < -0.05);
+
+      return bothMoving && handsFarEnough && upperZone && curvedPose && (circularish || oppositeSweep);
+    }
+
+
+    function smoothPoseLandmarks(newLandmarks) {
+      if (!newLandmarks) return;
+
+      // 數值越小越穩，但反應越慢；這裡偏穩定，減少手臂/腿閃動。
+      const smoothAmount = 0.16;
+
+      if (!smoothedPoseLandmarks) {
+        smoothedPoseLandmarks = newLandmarks.map(p => ({ ...p }));
+        return;
+      }
+
+      for (let i = 0; i < newLandmarks.length; i++) {
+        const np = newLandmarks[i];
+        const sp = smoothedPoseLandmarks[i];
+
+        if (!sp || !np) {
+          smoothedPoseLandmarks[i] = np ? { ...np } : sp;
+          continue;
+        }
+
+        const visibility = np.visibility ?? 1;
+
+        // 若某一點短暫偵測不穩，不要立刻跳到新位置或消失，先保留上一幀。
+        if (visibility < 0.18) {
+          sp.visibility = max(0.32, (sp.visibility ?? 0.5) * 0.96);
+          continue;
+        }
+
+        sp.x = lerp(sp.x, np.x, smoothAmount);
+        sp.y = lerp(sp.y, np.y, smoothAmount);
+        sp.z = lerp(sp.z || 0, np.z || 0, smoothAmount);
+        sp.visibility = lerp(sp.visibility ?? visibility, visibility, smoothAmount);
+      }
+    }
+
+    function setupMediaPipe() {
+      const videoElement = document.getElementById("input_video");
+
+      const pose = new Pose({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+      });
+
+      pose.setOptions({
+        modelComplexity: 0,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      pose.onResults((results) => {
+        if (results.poseLandmarks) {
+          poseLandmarks = results.poseLandmarks;
+          smoothPoseLandmarks(results.poseLandmarks);
+          poseReady = true;
+        }
+      });
+
+      const hands = new Hands({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }
+      });
+
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      hands.onResults((results) => {
+        handResults = results;
+        leftHandLandmarks = null;
+        rightHandLandmarks = null;
+
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+
+        // 使用畫面中的左右位置分配雙手，避免前鏡頭左右標籤混淆。
+        const handsWithCenter = results.multiHandLandmarks.map((landmarks) => {
+          const palm = getPalmCenter(landmarks);
+          return { landmarks, palm };
+        }).filter(item => item.palm !== null);
+
+        handsWithCenter.sort((a, b) => a.palm.x - b.palm.x);
+
+        if (handsWithCenter.length === 1) {
+          if (handsWithCenter[0].palm.x < width * 0.5) {
+            leftHandLandmarks = handsWithCenter[0].landmarks;
+          } else {
+            rightHandLandmarks = handsWithCenter[0].landmarks;
+          }
+        } else if (handsWithCenter.length >= 2) {
+          leftHandLandmarks = handsWithCenter[0].landmarks;
+          rightHandLandmarks = handsWithCenter[1].landmarks;
+        }
+      });
+
+      const camera = new Camera(videoElement, {
+        onFrame: async () => {
+          mediaPipeFrameCounter++;
+
+          // Pose 每幀跑，Hands 每 2 幀跑一次。
+          // 太極動作主要靠手腕與身體，手掌細節只用在「按」，所以不用每幀都跑 Hands。
+          await pose.send({ image: videoElement });
+
+          if (mediaPipeFrameCounter % 2 === 0) {
+            await hands.send({ image: videoElement });
+          }
+        },
+        width: 480,
+        height: 360
+      });
+
+      camera.start();
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+
+      inkDust = [];
+      createPaperLayer();
+
+      for (let f of fishes) {
+        f.x = random(width);
+        f.y = random(height);
+      }
+    }
+  </script>
+</body>
+</html>
